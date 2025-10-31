@@ -70,7 +70,7 @@ option(GGML_HOME "Path to external GGML source (optional)" OFF)
 # Source list
 # ------------------------------------------------------------
 set(SOURCE_FILES
-    "${CMAKE_CURRENT_SOURCE_DIR}/WhisperLib.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/whisperLib.c"
     "${WHISPER_LIB_DIR}/src/whisper.cpp"
 )
 
