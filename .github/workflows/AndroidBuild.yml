@@ -59,18 +59,19 @@ jobs:
           git submodule update --init --recursive
           echo "✅ Submodule list:"
           git submodule status || true
-          echo "🧱 whisper.cpp directory structure (top 3 levels):"
+
+          echo "🧱 whisper.cpp structure preview (top 3 levels):"
           find whisper.cpp -maxdepth 3 -type d -print || echo "⚠️ whisper.cpp not found"
 
           if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
-            echo "::error::whisper.cpp/src/whisper.cpp missing — submodule not cloned properly."
-            echo "Attempting manual clone as fallback..."
+            echo "::error::whisper.cpp/src/whisper.cpp missing — attempting fallback clone..."
+            rm -rf whisper.cpp
             git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp || true
             if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
-              echo "::error::Failed to restore whisper.cpp. Please check GH_TOKEN or submodule URL."
+              echo "::error::Failed to restore whisper.cpp. Please verify GH_TOKEN or submodule settings."
               exit 1
             fi
-            echo "✅ whisper.cpp restored via fallback clone."
+            echo "✅ whisper.cpp restored successfully."
           fi
 
       # -----------------------------------------------
@@ -106,6 +107,11 @@ jobs:
 
       - name: Write gradle.properties
         run: |
+          if [[ -z "${{ secrets.GH_TOKEN }}" ]]; then
+            echo "::error::GH_TOKEN is missing. Please set it in repository secrets."
+            exit 1
+          fi
+
           mkdir -p "$HOME/.gradle"
           cat <<'PROPS' > "$HOME/.gradle/gradle.properties"
           gh.owner=ishizuki-tech
@@ -136,15 +142,29 @@ jobs:
       - name: Verify CMake whisper.cpp path
         run: |
           echo "🔍 Verifying whisper.cpp source existence..."
-          TARGET="nativelib/src/main/jni/whisper/../../../../whisper.cpp/src/whisper.cpp"
+          ROOT="$(pwd)"
+          TARGET_REL="nativelib/src/main/jni/whisper/../../../../whisper.cpp/src/whisper.cpp"
+          TARGET="$(realpath "$ROOT/$TARGET_REL" 2>/dev/null || echo "$ROOT/$TARGET_REL")"
+
+          echo "🔎 Checking path: $TARGET"
           if [[ -f "$TARGET" ]]; then
             echo "✅ Found: $TARGET"
           else
             echo "::error::❌ Missing whisper.cpp/src/whisper.cpp"
-            echo "Listing current directories:"
-            ls -R nativelib/src/main/jni/whisper || true
-            ls -R whisper.cpp || true
-            exit 1
+            echo "PWD = $(pwd)"
+            echo "--------------------------------"
+            ls -al "$ROOT/nativelib/src/main/jni/whisper" || true
+            ls -al "$ROOT/whisper.cpp/src" || true
+            echo "--------------------------------"
+            echo "Attempting recovery..."
+            if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
+              git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp
+            fi
+            if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
+              echo "::error::Recovery failed — whisper.cpp missing."
+              exit 1
+            fi
+            echo "✅ whisper.cpp recovered successfully."
           fi
 
       # -----------------------------------------------
@@ -228,6 +248,7 @@ jobs:
         run: |
           FILE_GRADLE="${MODULE_PATH}/build.gradle.kts"
           VERSION=$(grep -E 'versionName' "$FILE_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
+          [[ -z "$VERSION" ]] && VERSION="0.0.0"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "✅ Derived version: $VERSION"
 
