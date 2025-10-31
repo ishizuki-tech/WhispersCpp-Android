@@ -144,19 +144,14 @@ jobs:
           echo "🔍 Verifying whisper.cpp source existence..."
           ROOT="$(pwd)"
           TARGET_REL="nativelib/src/main/jni/whisper/../../../../whisper.cpp/src/whisper.cpp"
-          TARGET="$(realpath "$ROOT/$TARGET_REL" 2>/dev/null || echo "$ROOT/$TARGET_REL")"
-
-          echo "🔎 Checking path: $TARGET"
-          if [[ -f "$TARGET" ]]; then
-            echo "✅ Found: $TARGET"
+          TARGET_PATH="${ROOT}/${TARGET_REL}"
+          echo "🔎 Checking path: $TARGET_PATH"
+          if [[ -f "$TARGET_PATH" ]]; then
+            echo "✅ Found: $TARGET_PATH"
           else
-            echo "::error::❌ Missing whisper.cpp/src/whisper.cpp"
-            echo "PWD = $(pwd)"
-            echo "--------------------------------"
+            echo "::warning::whisper.cpp not found at expected path. Attempting recovery..."
             ls -al "$ROOT/nativelib/src/main/jni/whisper" || true
             ls -al "$ROOT/whisper.cpp/src" || true
-            echo "--------------------------------"
-            echo "Attempting recovery..."
             if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
               git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp
             fi
@@ -192,12 +187,9 @@ jobs:
           AABs=$(find "$ROOT" -type f -name '*.aab' -print | sort || true)
           MAPs=$(find "$ROOT" -type f -name 'mapping.txt' -print | sort || true)
 
-          echo "Found APKs:"
-          echo "$APKs"
-          echo "Found AABs:"
-          echo "$AABs"
-          echo "Found MAPs:"
-          echo "$MAPs"
+          echo "Found APKs:"; echo "$APKs"
+          echo "Found AABs:"; echo "$AABs"
+          echo "Found MAPs:"; echo "$MAPs"
 
           {
             echo "apk_list<<EOF"
@@ -209,7 +201,7 @@ jobs:
             echo "map_list<<EOF"
             echo "$MAPs"
             echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          } | tee -a "$GITHUB_OUTPUT"
 
       # -----------------------------------------------
       # ☁️ Upload artifacts
@@ -266,11 +258,12 @@ jobs:
         id: notes
         run: |
           NOTES=$(git log -10 --pretty='* %s (%an)')
-          echo "body<<EOF" >> "$GITHUB_OUTPUT"
-          echo "## What's Changed" >> "$GITHUB_OUTPUT"
-          echo "$NOTES" >> "$GITHUB_OUTPUT"
-          echo "" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<EOF"
+            echo "## What's Changed"
+            echo "$NOTES"
+            echo "EOF"
+          } | tee -a "$GITHUB_OUTPUT"
           echo "🧾 Release notes prepared."
 
       - name: Publish GitHub Release
