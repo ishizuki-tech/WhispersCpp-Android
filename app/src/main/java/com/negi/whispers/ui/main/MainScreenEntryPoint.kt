@@ -1,12 +1,13 @@
 /**
  * Main Screen Entry Point and Core UI Logic
  * ----------------------------------------
- * This file defines the composables for the main UI of Whisper App.
- * It includes:
- * - Permission handling for microphone access
- * - Main screen layout and state coordination
- * - Recording list display and user interaction logic
- * - Debounced recording button behavior for safe user input
+ * This file defines the main composables for the Whisper App UI.
+ *
+ * Features:
+ * - Handles runtime microphone permission requests
+ * - Coordinates recording, playback, and transcription state
+ * - Displays a scrollable list of recordings
+ * - Implements debounced record button for safe user input
  */
 
 @file:OptIn(ExperimentalMaterial3Api::class)
@@ -34,27 +35,33 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Entry point composable for the Whisper app's main screen.
- * Handles permission checks and passes state down to [MainScreen].
+ * Entry point composable for the Whisper app’s main screen.
+ * Handles permission checks and passes recording state down to [MainScreen].
  *
- * @param viewModel The [MainScreenViewModel] managing core recording logic.
+ * @param viewModel The [MainScreenViewModel] managing audio and transcription logic.
  */
 @Composable
 fun MainScreenEntryPoint(viewModel: MainScreenViewModel) {
     val context = LocalContext.current
 
-    // Launcher for runtime permissions (microphone access)
+    // Permission launcher for microphone access
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { viewModel.updatePermissionsStatus() }
+    ) {
+        viewModel.updatePermissionsStatus()
+    }
 
-    // Request missing permissions on launch
+    // Check and request missing permissions when first launched
     LaunchedEffect(viewModel) {
         val missing = viewModel.getRequiredPermissions().filter {
             ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (missing.isNotEmpty()) permissionLauncher.launch(missing.toTypedArray())
-        else viewModel.updatePermissionsStatus()
+        if (missing.isNotEmpty()) {
+            Log.i("MainScreen", "Requesting permissions: $missing")
+            permissionLauncher.launch(missing.toTypedArray())
+        } else {
+            viewModel.updatePermissionsStatus()
+        }
     }
 
     var selectedIndex by rememberSaveable { mutableIntStateOf(-1) }
@@ -66,7 +73,7 @@ fun MainScreenEntryPoint(viewModel: MainScreenViewModel) {
         selectedIndex = selectedIndex,
         onSelect = { selectedIndex = it },
         onRecordTapped = {
-            Log.d("UI", "Record tapped: isRecording=${viewModel.isRecording}")
+            Log.d("UI", "Record button tapped (isRecording=${viewModel.isRecording})")
             selectedIndex = viewModel.myRecords.lastIndex
             viewModel.toggleRecord { selectedIndex = it }
         },
@@ -75,16 +82,16 @@ fun MainScreenEntryPoint(viewModel: MainScreenViewModel) {
 }
 
 /**
- * Main screen composable showing the recording list and record button.
- * Handles record start/stop, swipe-to-delete, and dialog confirmation.
+ * Displays the main screen layout: TopBar, recording list, and record button.
+ * Handles start/stop logic, swipe-to-delete, and delete confirmation.
  *
- * @param viewModel The [MainScreenViewModel] containing audio recording logic.
- * @param canTranscribe Indicates whether transcription is available.
- * @param isRecording Indicates whether the app is currently recording.
- * @param selectedIndex The currently selected recording index.
- * @param onSelect Callback invoked when a recording is selected.
- * @param onRecordTapped Callback to start or stop recording.
- * @param onCardClick Callback to play back a selected recording.
+ * @param viewModel The [MainScreenViewModel] providing recording control.
+ * @param canTranscribe Whether transcription is currently available.
+ * @param isRecording Whether the app is actively recording.
+ * @param selectedIndex Currently selected recording index.
+ * @param onSelect Callback when a recording is selected.
+ * @param onRecordTapped Callback when the record button is tapped.
+ * @param onCardClick Callback when a recording card is double-tapped or played.
  */
 @Composable
 private fun MainScreen(
@@ -101,11 +108,11 @@ private fun MainScreen(
     val listState = rememberLazyListState()
     val uiScope = rememberCoroutineScope()
 
-    // Debounce mechanism for preventing rapid repeated clicks
+    // Debounce protection to prevent rapid button taps
     var clickLocked by remember { mutableStateOf(false) }
     val lockDurationMs = 400L
 
-    // Controls record button enable state
+    // Determine when the record button should be enabled
     val recordButtonEnabled by remember(
         viewModel.hasAllRequiredPermissions,
         canTranscribe,
@@ -113,21 +120,25 @@ private fun MainScreen(
         clickLocked
     ) {
         derivedStateOf {
-            if (isRecording) return@derivedStateOf true
-            if (!viewModel.hasAllRequiredPermissions) return@derivedStateOf false
-            canTranscribe && !clickLocked
+            when {
+                isRecording -> true
+                !viewModel.hasAllRequiredPermissions -> false
+                else -> canTranscribe && !clickLocked
+            }
         }
     }
 
-    Scaffold(topBar = { TopBar(viewModel) }) { innerPadding ->
+    Scaffold(
+        topBar = { TopBar(viewModel) }
+    ) { innerPadding ->
         Column(
             modifier = Modifier
                 .padding(innerPadding)
-                .padding(16.dp)
+                .padding(horizontal = 16.dp, vertical = 8.dp)
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Recording list section
+            // Recordings list
             RecordingList(
                 viewModel = viewModel,
                 records = viewModel.myRecords,
@@ -145,7 +156,7 @@ private fun MainScreen(
                     .fillMaxWidth()
             )
 
-            // Record button section
+            // Record / Stop button with debounce handling
             StyledButton(
                 text = if (isRecording) "Stop" else "Record",
                 onClick = {
@@ -170,7 +181,7 @@ private fun MainScreen(
         }
     }
 
-    // Confirm delete dialog
+    // Delete confirmation dialog
     if (showDeleteDialog && pendingDeleteIndex != -1) {
         ConfirmDeleteDialog(
             onConfirm = {

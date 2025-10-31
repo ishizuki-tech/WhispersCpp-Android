@@ -63,12 +63,13 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     // UI States
     // ---------------------------------------------------------------------
 
+    var selectedLanguage by mutableStateOf("en"); private set
+    var selectedModel by mutableStateOf("ggml-model-q4_0.bin"); private set
+
     var canTranscribe by mutableStateOf(false); private set
     var isRecording by mutableStateOf(false); private set
     var isModelLoading by mutableStateOf(false); private set
     var hasAllRequiredPermissions by mutableStateOf(false); private set
-    var selectedLanguage by mutableStateOf("en"); private set
-    var selectedModel by mutableStateOf("ggml-tiny-q5_1.bin"); private set
     var translateToEnglish by mutableStateOf(false); private set
     var myRecords by mutableStateOf<List<MyRecord>>(emptyList()); private set
 

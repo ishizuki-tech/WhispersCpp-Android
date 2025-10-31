@@ -2,11 +2,15 @@
  * Whisper UI Composables
  * -----------------------
  * This file defines all composable UI elements used in the Whisper app:
- * - Styled buttons, configuration dialogs, and dropdown selectors
- * - Recording list with animations and swipe-to-delete behavior
- * - Top bar with app info and language/model display
  *
- * Each composable is documented in Kotlin's standard development doc style.
+ * Components included:
+ * - Styled buttons and configuration dialogs
+ * - Language/model dropdown selectors
+ * - Recording list with animations and swipe-to-delete
+ * - Top bar with app info, language, and model display
+ *
+ * All composables follow Kotlin’s official documentation style (KDoc),
+ * ensuring clarity, maintainability, and consistency.
  */
 
 package com.negi.whispers.ui.composables
@@ -29,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.negi.whispers.ui.main.MainScreenViewModel
@@ -36,14 +41,18 @@ import com.negi.whispers.ui.main.MyRecord
 import kotlinx.coroutines.launch
 import java.io.File
 
+// ============================================================================
+// Styled UI Elements
+// ============================================================================
+
 /**
- * Renders a rounded, elevated button with primary color by default.
+ * Displays a rounded, elevated button using the primary color by default.
  *
- * @param text Label text for the button.
- * @param onClick Action executed when the button is tapped.
- * @param modifier Optional layout modifier.
- * @param enabled Enables/disables button interactivity.
- * @param color Button background color (default = primary color).
+ * @param text Label text displayed on the button.
+ * @param onClick Callback triggered when the button is tapped.
+ * @param modifier Optional [Modifier] for layout customization.
+ * @param enabled Enables or disables button interactivity.
+ * @param color Custom background color (defaults to primary).
  */
 @Composable
 fun StyledButton(
@@ -56,8 +65,8 @@ fun StyledButton(
     Button(
         onClick = onClick,
         enabled = enabled,
-        colors = ButtonDefaults.buttonColors(containerColor = color),
         shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = color),
         elevation = ButtonDefaults.buttonElevation(6.dp),
         modifier = modifier
     ) {
@@ -65,10 +74,14 @@ fun StyledButton(
     }
 }
 
+// ============================================================================
+// Settings Dialog and Dropdown Selectors
+// ============================================================================
+
 /**
- * Settings button and dialog that allow users to select language, model, and translation options.
+ * Renders the settings button and dialog for language, model, and translation options.
  *
- * @param viewModel Main screen ViewModel managing current configuration state.
+ * @param viewModel The [MainScreenViewModel] managing configuration state.
  */
 @Composable
 fun ConfigButtonWithDialog(viewModel: MainScreenViewModel) {
@@ -81,22 +94,25 @@ fun ConfigButtonWithDialog(viewModel: MainScreenViewModel) {
     if (showDialog) {
         AlertDialog(
             onDismissRequest = { showDialog = false },
-            title = { Text("設定") },
+            title = { Text("Settings") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("言語を選択")
-                    val languages = listOf("en" to "English", "ja" to "日本語", "sw" to "Swahili")
+                    Text("Select language")
+                    val languages = listOf("en" to "English", "ja" to "Japanese", "sw" to "Swahili")
                     DropdownSelector(
                         currentValue = viewModel.selectedLanguage,
                         options = languages,
                         onSelect = { viewModel.updateSelectedLanguage(it) }
                     )
 
-                    Text("モデルを選択")
+                    Spacer(Modifier.height(8.dp))
+
+                    Text("Select model")
                     val models = listOf(
                         "ggml-tiny-q5_1.bin",
                         "ggml-base-q5_1.bin",
-                        "ggml-small-q5_1.bin"
+                        "ggml-small-q5_1.bin",
+                        "ggml-model-q4_0.bin"
                     )
                     DropdownSelector(
                         currentValue = viewModel.selectedModel,
@@ -104,28 +120,32 @@ fun ConfigButtonWithDialog(viewModel: MainScreenViewModel) {
                         onSelect = { viewModel.updateSelectedModel(it) }
                     )
 
+                    Spacer(Modifier.height(8.dp))
+
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             checked = viewModel.translateToEnglish,
                             onCheckedChange = { viewModel.updateTranslate(it) }
                         )
-                        Text("英語に翻訳する")
+                        Text("Translate to English")
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showDialog = false }) { Text("OK") }
+                TextButton(onClick = { showDialog = false }) {
+                    Text("OK")
+                }
             }
         )
     }
 }
 
 /**
- * Dropdown menu selector used in the configuration dialog.
+ * Generic dropdown selector used inside dialogs.
  *
- * @param currentValue Currently selected value key.
- * @param options List of key/label pairs.
- * @param onSelect Callback when a new value is chosen.
+ * @param currentValue The currently selected key.
+ * @param options List of key–label pairs to display.
+ * @param onSelect Invoked when a new value is selected.
  */
 @Composable
 private fun DropdownSelector(
@@ -163,19 +183,27 @@ private fun DropdownSelector(
     }
 }
 
+// ============================================================================
+// Recording List
+// ============================================================================
+
 /**
- * Displays a scrollable list of recordings.
- * Includes swipe-to-delete, tap-to-select, and double-tap-to-retranscribe gestures.
+ * Displays a scrollable, animated list of recordings.
  *
- * @param viewModel Reference to the main screen's ViewModel.
+ * Includes:
+ * - Swipe-to-delete gesture
+ * - Tap-to-select
+ * - Double-tap-to-retranscribe
+ *
+ * @param viewModel Reference to [MainScreenViewModel].
  * @param records List of recorded items.
- * @param listState LazyColumn scroll state.
- * @param selectedIndex Currently selected recording index.
- * @param canTranscribe Whether the app is ready to transcribe.
- * @param onSelect Called when a single tap selects a record.
- * @param onCardClick Called when the user double taps (to re-transcribe).
- * @param onDeleteRequest Called when a swipe-to-delete occurs.
- * @param modifier Optional layout modifier.
+ * @param listState Scroll state of the [LazyColumn].
+ * @param selectedIndex Index of the currently selected recording.
+ * @param canTranscribe Indicates if transcription is available.
+ * @param onSelect Called when a record is tapped.
+ * @param onCardClick Called when a record is double-tapped (re-transcribe).
+ * @param onDeleteRequest Invoked when a swipe-to-delete occurs.
+ * @param modifier Optional [Modifier] for layout control.
  */
 @Composable
 fun RecordingList(
@@ -189,6 +217,7 @@ fun RecordingList(
     onDeleteRequest: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Scroll to the newest item when a new recording is added
     LaunchedEffect(records.size) {
         try {
             if (records.isNotEmpty()) listState.animateScrollToItem(records.lastIndex)
@@ -197,8 +226,8 @@ fun RecordingList(
         }
     }
 
-    val globalTransition = rememberInfiniteTransition(label = "globalPulse")
-    val pulsingScale by globalTransition.animateFloat(
+    val infiniteTransition = rememberInfiniteTransition(label = "globalPulse")
+    val pulsingScale by infiniteTransition.animateFloat(
         initialValue = 0.95f,
         targetValue = 1.05f,
         animationSpec = infiniteRepeatable(
@@ -219,8 +248,8 @@ fun RecordingList(
             val scope = rememberCoroutineScope()
 
             // Swipe-to-delete handler
-            LaunchedEffect(swipeState.currentValue) {
-                if (swipeState.currentValue == SwipeToDismissBoxValue.StartToEnd) {
+            LaunchedEffect(swipeState.targetValue) {
+                if (swipeState.targetValue == SwipeToDismissBoxValue.StartToEnd) {
                     onDeleteRequest(index)
                     swipeState.snapTo(SwipeToDismissBoxValue.Settled)
                 }
@@ -262,15 +291,18 @@ fun RecordingList(
                 enableDismissFromEndToStart = false,
                 backgroundContent = {
                     Box(
-                        Modifier.fillMaxSize().padding(start = 20.dp),
+                        Modifier
+                            .fillMaxSize()
+                            .padding(start = 20.dp),
                         contentAlignment = Alignment.CenterStart
                     ) {
-                        Text("削除", color = Color.Red, fontWeight = FontWeight.Bold)
+                        Text("Delete", color = Color.Red, fontWeight = FontWeight.Bold)
                     }
                 }
             ) {
                 Card(
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
                         .graphicsLayer(scaleX = effectiveScale, scaleY = effectiveScale)
                         .then(tapModifier),
                     shape = RoundedCornerShape(animatedCorner),
@@ -282,18 +314,26 @@ fun RecordingList(
                         }
                     )
                 ) {
-                    Text(record.logs, Modifier.padding(16.dp), softWrap = true)
+                    Text(
+                        record.logs,
+                        modifier = Modifier.padding(16.dp),
+                        softWrap = true
+                    )
                 }
             }
         }
     }
 }
 
+// ============================================================================
+// Dialogs and Top Bar
+// ============================================================================
+
 /**
- * Confirmation dialog for deleting a recording.
+ * Confirmation dialog shown when deleting a recording.
  *
- * @param onConfirm Callback when delete is confirmed.
- * @param onCancel Callback when user cancels.
+ * @param onConfirm Called when the user confirms deletion.
+ * @param onCancel Called when the user cancels.
  */
 @Composable
 fun ConfirmDeleteDialog(onConfirm: () -> Unit, onCancel: () -> Unit) {
@@ -302,30 +342,39 @@ fun ConfirmDeleteDialog(onConfirm: () -> Unit, onCancel: () -> Unit) {
         title = { Text("Delete Recording") },
         text = { Text("Are you sure you want to delete this recording?") },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            TextButton(onClick = onConfirm) {
+                Text("Delete", color = MaterialTheme.colorScheme.error)
+            }
         },
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } }
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        }
     )
 }
 
 /**
- * Small text label showing currently selected language and model.
+ * Displays the current language and model as a compact label.
+ *
+ * @param languageCode ISO language code (e.g., "ja", "en").
+ * @param selectedModel Name of the loaded Whisper model.
  */
 @Composable
 private fun LanguageLabel(languageCode: String, selectedModel: String) {
     val code = languageCode.ifBlank { "—" }
     val model = selectedModel.ifBlank { "—" }
     Text(
-        "[$code · $model]",
+        text = "[$code · $model]",
         fontSize = 12.sp,
-        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
     )
 }
 
 /**
- * Top application bar showing app name, info, and settings buttons.
+ * Displays the top application bar with app title, info, and settings buttons.
  *
- * @param viewModel MainScreenViewModel providing current settings.
+ * @param viewModel The [MainScreenViewModel] providing configuration and metadata.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -338,9 +387,13 @@ fun TopBar(viewModel: MainScreenViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Default.Mic, contentDescription = "Mic", tint = Color(0xFF2196F3))
+                Icon(
+                    imageVector = Icons.Default.Mic,
+                    contentDescription = "Mic",
+                    tint = Color(0xFF2196F3)
+                )
                 Text(
-                    "Whisper App",
+                    text = "Whisper App",
                     fontWeight = FontWeight.Bold,
                     fontSize = 20.sp,
                     color = Color.Black
@@ -363,16 +416,16 @@ fun TopBar(viewModel: MainScreenViewModel) {
     if (showAboutDialog) {
         AlertDialog(
             onDismissRequest = { showAboutDialog = false },
-            title = { Text("このアプリについて") },
+            title = { Text("About this App") },
             text = {
                 Column {
                     Text("Whisper App v0.0.1")
                     Spacer(Modifier.height(8.dp))
-                    Text("Whisper.cpp を使用したオフライン音声認識アプリです。")
+                    Text("An offline speech recognition app powered by Whisper.cpp.")
                     Spacer(Modifier.height(4.dp))
-                    Text("対応言語: 日本語 / 英語 / スワヒリ語")
+                    Text("Supported languages: English / Japanese / Swahili")
                     Spacer(Modifier.height(8.dp))
-                    Text("開発者: Shu Ishizuki (石附 支)")
+                    Text("Developer: Shu Ishizuki")
                 }
             },
             confirmButton = {

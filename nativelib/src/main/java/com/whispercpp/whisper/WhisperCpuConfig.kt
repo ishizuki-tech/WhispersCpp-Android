@@ -1,11 +1,11 @@
 // file: com/whispercpp/whisper/WhisperCpuConfig.kt
 // ============================================================
-// ✅ WhisperCpuConfig — Adaptive Thread Optimizer (Full Debug Version)
+// ✅ WhisperCpuConfig — Adaptive Thread Optimizer (Final Debug Edition)
 // ------------------------------------------------------------
-// • Dynamically detects big.LITTLE high-performance cores
-// • Robust to /proc/cpuinfo or cpufreq access errors
-// • Falls back safely to availableProcessors()
-// • Detailed debug logging for frequency / variant bins
+// • Detects big.LITTLE topology via /sys frequency & variant heuristics
+// • Robust against permission or I/O failures
+// • Provides stable minimum thread count (≥2)
+// • Fine-grained debug logging for SoC frequency / cluster distribution
 // ============================================================
 
 package com.whispercpp.whisper
@@ -16,35 +16,41 @@ import java.io.File
 /**
  * Provides an adaptive thread count hint for whisper.cpp inference.
  *
- * whisper.cpp scales linearly across big cores, but with diminishing returns
- * on LITTLE cores. Using too many threads can hurt performance by scheduling
- * small cores into heavy matrix ops (GGML/BLAS), so this detector aims to
- * find a reasonable upper bound for parallelism.
+ * whisper.cpp scales nearly linearly across high-performance cores,
+ * but using LITTLE cores often introduces context-switching overhead
+ * due to smaller L1 caches and reduced SIMD width (e.g. A510/A520).
  *
- * Design goals:
- *  - Detect high-performance cores (big cores) on heterogeneous SoCs.
- *  - Stay safe if /proc or /sys files are missing or unreadable.
- *  - Never crash on malformed data; always return ≥ 2 threads.
+ * This helper estimates the number of “big” cores to use for compute-heavy
+ * tasks (matrix multiplication, FFT, attention kernels).
+ *
+ * Design principles:
+ * - Prefer /sys frequency readings (authoritative on most Android SoCs)
+ * - Fallback to /proc variant ID grouping when /sys unavailable
+ * - Never crash; always return ≥ 2 threads for decoding stability
  */
 object WhisperCpuConfig {
 
-    /** Recommended thread count (≥ 2). Evaluated lazily on access. */
+    /** Lazily-evaluated thread count recommendation (≥ 2). */
     val preferredThreadCount: Int
         get() = CpuInfo.determineHighPerfCpuCount()
-            .coerceAtLeast(2) // enforce minimum to maintain decode throughput
+            .coerceAtLeast(2)
 }
 
 /**
- * Internal helper class that encapsulates CPU property parsing.
- * Reads `/proc/cpuinfo` lines and uses two-tier logic:
- *   1. Prefer /sys frequency comparison (most reliable on Android)
- *   2. Fallback to CPU variant hex codes if /sys data missing
+ * Internal helper class for parsing CPU topology data.
+ *
+ * The logic follows a two-tier fallback:
+ * 1. Primary: frequency analysis from /sys cpufreq entries
+ * 2. Secondary: cluster differentiation using variant hex codes
+ *
+ * The fallback ensures a usable thread hint even on restricted systems
+ * (e.g. sandboxed processes, devices with sealed /sys access).
  */
 private class CpuInfo(private val lines: List<String>) {
 
     /**
-     * Estimate the count of "big" high-performance cores.
-     * Primary heuristic: frequency; fallback: variant field.
+     * Entry point: attempts frequency-based detection first,
+     * falls back to variant-based if necessary.
      */
     fun computeHighPerfCpuCount(): Int = try {
         computeByFrequency()
@@ -53,39 +59,59 @@ private class CpuInfo(private val lines: List<String>) {
         computeByVariant()
     }
 
+    // ------------------------------------------------------------
+    // Frequency-based detection (preferred)
+    // ------------------------------------------------------------
     /**
-     * Frequency-based estimation using /sys/.../cpuinfo_max_freq.
-     *
-     * - Collects per-core maximum frequencies (in kHz)
-     * - Assumes the lowest group is LITTLE cluster, higher = big cluster
-     * - Returns the count of cores whose freq > minimum freq
+     * Estimates number of high-performance cores via max frequency comparison.
+     * Each cluster typically reports distinct cpuinfo_max_freq values.
      */
     private fun computeByFrequency(): Int {
-        val freqList = getCpuValues("processor") { getMaxCpuFrequency(it.toInt()) }
-        Log.d(LOG_TAG, "CPU frequencies (kHz): ${freqList.binnedValues()}")
-        return freqList.countDroppingMin()
+        val freqList = getProcessorIndices().map { getMaxCpuFrequency(it) }
+        if (freqList.isEmpty()) return 0
+
+        val freqBins = freqList.groupingBy { it }.eachCount()
+        Log.d(LOG_TAG, "CPU freq bins (kHz): $freqBins")
+
+        // Identify threshold between LITTLE and big clusters
+        val minFreq = freqList.minOrNull() ?: 0
+        val highPerfCount = freqList.count { it > minFreq }
+        Log.d(LOG_TAG, "Detected high-perf cores=$highPerfCount via freq (min=$minFreq kHz)")
+        return highPerfCount
     }
 
+    // ------------------------------------------------------------
+    // Variant-based detection (fallback)
+    // ------------------------------------------------------------
     /**
-     * Variant-based fallback if frequency access fails.
-     *
-     * Example:
-     *   CPU variant : 0x0 → LITTLE
-     *   CPU variant : 0x1 → big
-     * These hexadecimal variant codes differ between clusters.
+     * Fallback when frequency info is unavailable.
+     * Uses variant field hex codes to differentiate clusters.
      */
     private fun computeByVariant(): Int {
         val variants = getCpuValues("CPU variant") {
             it.substringAfter("0x").toIntOrNull(16) ?: 0
         }
-        Log.d(LOG_TAG, "CPU variants (hex): ${variants.binnedValues()}")
-        return variants.countKeepingMin()
+        if (variants.isEmpty()) return 0
+        val variantBins = variants.groupingBy { it }.eachCount()
+        Log.d(LOG_TAG, "CPU variant bins (hex): $variantBins")
+
+        // Higher variant code typically indicates performance cluster.
+        val min = variants.minOrNull() ?: 0
+        val highPerfCount = variants.count { it > min }
+        Log.d(LOG_TAG, "Detected high-perf cores=$highPerfCount via variant (min=0x${min.toString(16)})")
+        return highPerfCount
     }
 
-    /**
-     * Extracts numeric values for all CPUs based on a property key.
-     * E.g., "CPU variant : 0x1" → returns [1, 1, 0, 0, ...].
-     */
+    // ------------------------------------------------------------
+    // Parsing utilities
+    // ------------------------------------------------------------
+    /** Extracts processor indices (e.g., “processor : 0”) safely. */
+    private fun getProcessorIndices(): List<Int> =
+        lines.filter { it.startsWith("processor") }
+            .mapNotNull { it.substringAfter(":").trim().toIntOrNull() }
+            .sorted()
+
+    /** Generic extractor for numeric fields like “CPU variant : 0x1”. */
     private fun getCpuValues(property: String, mapper: (String) -> Int): List<Int> =
         lines.asSequence()
             .filter { it.startsWith(property) }
@@ -93,66 +119,45 @@ private class CpuInfo(private val lines: List<String>) {
             .sorted()
             .toList()
 
-    /** Debug helper — returns frequency/variant histogram. */
-    private fun List<Int>.binnedValues(): Map<Int, Int> = groupingBy { it }.eachCount()
-
-    /**
-     * Counts cores faster than the slowest frequency group.
-     * Useful when little cores have same minimal freq (e.g. 1.8GHz),
-     * and big cores show a distinct jump (e.g. 2.4–3.0GHz).
-     */
-    private fun List<Int>.countDroppingMin(): Int {
-        val min = minOrNull() ?: return 0
-        return count { it > min }
-    }
-
-    /**
-     * Counts cores whose variant matches the minimum code.
-     * (Simpler fallback when only variant IDs differ per cluster.)
-     */
-    private fun List<Int>.countKeepingMin(): Int {
-        val min = minOrNull() ?: return 0
-        return count { it == min }
-    }
-
     companion object {
         private const val LOG_TAG = "WhisperCpuConfig"
 
         /**
-         * Main entry used by [WhisperCpuConfig].
-         * Returns number of detected big cores or a heuristic fallback.
+         * Main entry invoked by [WhisperCpuConfig].
+         * Returns detected big-core count or heuristic fallback.
          */
         fun determineHighPerfCpuCount(): Int = try {
             val info = readCpuInfo()
             val detected = info.computeHighPerfCpuCount()
             if (detected > 0) detected else safeFallback()
         } catch (e: Exception) {
-            Log.d(LOG_TAG, "Failed to parse /proc/cpuinfo → using fallback", e)
+            Log.w(LOG_TAG, "Failed to parse /proc/cpuinfo → fallback", e)
             safeFallback()
         }
 
         /**
-         * Graceful fallback when detection fails.
-         * Uses availableProcessors() and basic assumptions:
-         *  - If ≥8 logical cores: assume 4 are big (A78+/X3 class)
-         *  - If fewer: use half the logical cores as big cores
+         * Fallback heuristic when detection fails completely.
+         *
+         * Strategy:
+         * - For SoCs with ≥8 logical cores: assume ~half are big
+         * - For smaller SoCs: at least 2, but never exceed 8
          */
         private fun safeFallback(): Int {
             val total = Runtime.getRuntime().availableProcessors()
-            val est = if (total >= 8) total - 4 else total / 2
-            val result = est.coerceAtLeast(1)
-            Log.d(LOG_TAG, "Fallback high-perf cores=$result (total=$total)")
+            val est = minOf(total / 2, 8)
+            val result = est.coerceAtLeast(2)
+            Log.d(LOG_TAG, "Fallback: high-perf cores=$result (total=$total)")
             return result
         }
 
         /**
-         * Reads /proc/cpuinfo safely and returns CpuInfo.
-         * Throws if unreadable or empty.
+         * Reads and parses `/proc/cpuinfo`.
+         * Throws if unreadable or empty to trigger fallback path.
          */
         private fun readCpuInfo(): CpuInfo {
             val file = File("/proc/cpuinfo")
             if (!file.canRead()) {
-                Log.w(LOG_TAG, "Cannot read /proc/cpuinfo → using fallback")
+                Log.w(LOG_TAG, "/proc/cpuinfo unreadable → fallback")
                 throw IllegalStateException("cpuinfo not readable")
             }
             val lines = file.useLines { it.toList() }
@@ -161,19 +166,19 @@ private class CpuInfo(private val lines: List<String>) {
         }
 
         /**
-         * Reads per-core max frequency (kHz).
-         * Returns 0 if the file or directory does not exist.
+         * Reads the maximum clock frequency for a given core index.
          *
          * Typical path:
-         *   /sys/devices/system/cpu/cpuX/cpufreq/cpuinfo_max_freq
+         * `/sys/devices/system/cpu/cpuX/cpufreq/cpuinfo_max_freq`
+         *
+         * Returns 0 if unavailable, in kHz.
          */
         private fun getMaxCpuFrequency(cpuIndex: Int): Int {
             val path = "/sys/devices/system/cpu/cpu$cpuIndex/cpufreq/cpuinfo_max_freq"
             return try {
-                val value = File(path).takeIf { it.exists() }?.readText()?.trim()
-                value?.toIntOrNull() ?: 0
+                File(path).takeIf { it.exists() }?.readText()?.trim()?.toIntOrNull() ?: 0
             } catch (e: Exception) {
-                Log.v(LOG_TAG, "No freq for cpu$cpuIndex: ${e.message}")
+                Log.v(LOG_TAG, "Cannot read $path: ${e.message}")
                 0
             }
         }
