@@ -1,156 +1,31 @@
-Skip to content
-You said:
-# =========================================
-# Android Studio / Gradle Ignore Rules
-# =========================================
-
-# Gradle build folders
-.gradle/
-build/
-**/build/
-**/.cxx/
-**/.externalNativeBuild/
-
-# Local configuration (SDK path, signing keys, etc.)
-local.properties
-gradle.properties
-
-# Log and temporary files
-*.log
-*.temp
-*.tmp
-
-# Output artifacts
-*.apk
-*.aab
-*.ap_
-*.dex
-output.json
-
-# =========================================
-# IDE & Tooling
-# =========================================
-
-# IntelliJ / Android Studio project files
-.idea/
-*.iml
-*.ipr
-*.iws
-
-# VSCode (if any)
-.vscode/
-
-# =========================================
-# OS / System Files
-# =========================================
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# =========================================
-# Android-Specific
-# =========================================
-
-# Captures & profiler outputs
-captures/
-*.hprof
-
-# Google Services (API keys, Firebase config)
-google-services.json
-
-# Keystore (DO NOT COMMIT)
-*.jks
-*.keystore
-
-# =========================================
-# Kotlin / JetBrains Tools
-# =========================================
-.kotlin/
-
-# =========================================
-# NDK / C++ Native Build
-# =========================================
-**/obj/
-**/libs/
-**/.ndk/
-**/cmake-build*/
-
-# =========================================
-# Miscellaneous
-# =========================================
-*.class
-*.orig
-*.bak
-*.swp
-*.swo
-*.rej
-*.patch
-
-# =========================================
-# Module / Subproject-Specific
-# =========================================
-# Ignore auto-generated JNI outputs but keep native sources
-nativelib/.cxx/
-nativelib/build/
-nativelib/obj/
-nativelib/libs/
-nativelib/whisper_core/
-
-# =========================================
-# Optional: Git submodule metadata (keep tracked)
-# =========================================
-# .gitmodules should be committed!
-!.gitmodules
-
-# =========================================
-# End of file
-# =========================================
-
-UpdateしてDebugして完全版を見せて
-Android用の
-ChatGPT said:
-
-Thought for 18s
-了解、Android/Gradle＋NDK/JNI向けに“安全寄り”で見直して、衝突しがちなパターンもデバッグ済みの完全版 .gitignoreを用意しました（コメントは英語）。そのままプロジェクト直下に貼り付けて使えます。
-
 # =========================================
 # Android / Gradle — Production-Ready .gitignore
 # -----------------------------------------
 # Notes:
 # - Keep Gradle Wrapper in VCS: gradlew, gradlew.bat, gradle/wrapper/** MUST be committed.
-# - We assume multi-module projects (app/, :feature, :nativelib, etc.).
-# - JNI prebuilt libs in src/**/jniLibs/** SHOULD be committed; build artifacts should not.
+# - Supports multi-module projects (app/, :feature, :nativelib, etc.).
+# - Prebuilt JNI libs under src/**/jniLibs/** SHOULD be committed; build artifacts should not.
 # =========================================
 
 # -----------------------------------------
 # Gradle caches & build outputs
 # -----------------------------------------
-.gradle/                       # Gradle user home cache inside repo
-**/build/                      # All module build directories
-**/.cxx/                       # AGP/NDK CMake intermediates
-**/.externalNativeBuild/       # Old externalNativeBuild intermediates
-.kotlinc/                      # Kotlin compiler local cache (rare)
-.kotlin/                       # Kotlin incremental/daemon caches
+.gradle/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+.kotlinc/
+.kotlin/
 
-# Do NOT ignore Gradle Wrapper (keep these tracked)
+# Keep Gradle Wrapper tracked
 !gradlew
 !gradlew.bat
 !gradle/wrapper/gradle-wrapper.jar
 !gradle/wrapper/gradle-wrapper.properties
 
-# Local/host-specific Gradle settings (contains SDK paths, etc.)
+# Local environment / secrets
 local.properties
-
-# gradle.properties often contains secrets/tokens; keep out of VCS.
 gradle.properties
-# If you maintain a public, non-secret variant, allow-list it:
 !gradle.public.properties
 !gradle-example.properties
 
@@ -162,11 +37,8 @@ gradle.properties
 *.ap_
 *.dex
 output.json
-
-# R8/ProGuard mappings (under build/, but keep explicit for clarity)
+output-metadata.json
 **/outputs/mapping/
-
-# Lint/analysis reports (generated)
 **/lint-results*
 **/reports/
 **/test-results/
@@ -187,7 +59,7 @@ output.json
 *.toc
 *.aux
 
-# Crash/heap/trace artifacts
+# Crash / heap / trace artifacts
 *.hprof
 *.ctest
 *.trace
@@ -199,61 +71,39 @@ core.*
 # -----------------------------------------
 # IDE / Tooling
 # -----------------------------------------
-# IntelliJ / Android Studio
 .idea/
 *.iml
 *.ipr
 *.iws
-
-# (Optional) Keep shared code style & run configs — uncomment to keep
-#!.idea/codeStyles/
-#!.idea/inspectionProfiles/
-#!.idea/runConfigurations/
-#!.idea/vcs.xml
-
-# VS Code
 .vscode/
-
-# JetBrains Fleet
 .fleet/
+#!.idea/codeStyles/
+#!.idea/runConfigurations/
 
 # -----------------------------------------
 # OS / System files
 # -----------------------------------------
-# macOS
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# Windows
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
-# Linux
 *~
 
 # -----------------------------------------
 # Android-specific folders
 # -----------------------------------------
-captures/                      # Android Studio screen captures
-# Profilers can write various files under build/, already ignored
-
-# Google Services & configs (can contain API keys)
+captures/
 google-services.json
-# (If you intentionally commit a placeholder/example, allow-list it)
 !google-services.example.json
-
-# Firebase Crashlytics (generated in build/, but explicit for clarity)
 **/crashlytics-build.properties
-
-# Keystores / signing configs — NEVER commit
 *.jks
 *.keystore
 keystore.properties
 signing.properties
 
-# .env & secrets (12-factor style)
+# Environment / secrets
 .env
 .env.*
 !.env.example
@@ -266,38 +116,29 @@ secrets.*
 # -----------------------------------------
 # NDK / C++ Native (CMake / ndk-build) artifacts
 # -----------------------------------------
-# Generic intermediates
 **/obj/
-# Some projects output to libs/ at build time; avoid ignoring source jniLibs
-# Keep prebuilt JNI libs under src/**/jniLibs/**, ignore other stray libs dirs
 **/libs/
 !**/src/**/jniLibs/
 !**/src/**/jniLibs/**
-
-# CMake out-of-source build folders
 **/cmake-build*/
 **/CMakeFiles/
 **/CMakeCache.txt
 **/cmake_install.cmake
 **/Makefile
-
-# Ninja build files
 **/build.ninja
 **/.ninja_deps
 **/.ninja_log
 **/rules.ninja
 
 # -----------------------------------------
-# Kotlin/Annotation processors
+# Kotlin / Annotation processors
 # -----------------------------------------
-# (Generated sources live in build/, already ignored)
 .kapt/
 .ksp/
 
 # -----------------------------------------
 # Testing / Benchmarking
 # -----------------------------------------
-# Orchestrator/benchmark traces (under build/ normally)
 **/benchmark/**/reports/
 **/benchmark/**/results/
 **/benchmark/**/outputs/
@@ -309,29 +150,22 @@ secrets.*
 nativelib/.cxx/
 nativelib/build/
 nativelib/obj/
-# Keep JNI sources & headers
 !nativelib/src/
 !nativelib/src/**
-
-# -----------------------------------------
-# Git Submodules
-# -----------------------------------------
-# .gitmodules SHOULD be committed
-!.gitmodules
-
-# If submodules vendor third-party sources, ignore their build outputs too
 **/third_party/**/build/
 **/third-party/**/build/
 
 # -----------------------------------------
-# Misc language/tooling (optional; uncomment if used)
+# Git Submodules
 # -----------------------------------------
-# Ktlint/Detekt caches
+!.gitmodules
+
+# -----------------------------------------
+# Optional toolchains (uncomment if used)
+# -----------------------------------------
 #.ktlint/
 #.detekt/
-# SonarQube
 #.scannerwork/
-# Node (if you embed JS tooling for Docs/Playground)
 #node_modules/
 #pnpm-lock.yaml
 #package-lock.json
