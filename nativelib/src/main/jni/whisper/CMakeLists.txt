@@ -2,13 +2,14 @@ cmake_minimum_required(VERSION 3.10)
 project(whisper_jni LANGUAGES C CXX)
 
 # ============================================================
-# ✅ whisper.cpp — Android JNI Build Script (Final Working Edition)
+# ✅ whisper.cpp — Android JNI Build Script (Final Debug Edition)
 # ------------------------------------------------------------
-# • Builds JNI shared libraries for whisper.cpp + WhisperLib.c
-# • Supports multiple ABI-optimized builds (arm64-v8a / armeabi-v7a)
-# • Automatically switches between bundled and external GGML
-# • Enables aggressive compiler and linker optimizations
-# • Safe for Android Studio + NDK 28 (Clang 19)
+# • Compatible with both local + CI (GitHub Actions)
+# • Auto-detects whisper.cpp path (handles whisper_core OR whisper.cpp)
+# • Verifies source existence before configure
+# • Provides per-ABI optimized builds (arm64-v8a / armeabi-v7a)
+# • Aggressive optimizations + LTO + gc-sections
+# • Clang 19 (NDK 28) safe
 # ============================================================
 
 # ------------------------------------------------------------
@@ -21,65 +22,82 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ------------------------------------------------------------
-# Directory setup (use current JNI folder for reliable relative paths)
+# Directory detection logic
 # ------------------------------------------------------------
-# Base directory of whisper.cpp (relative to this JNI folder)
-set(WHISPER_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper_core"
-        CACHE PATH "Path to whisper.cpp root directory")
+set(LOCAL_WHISPER_CORE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper_core")
+set(LOCAL_WHISPER_CPP  "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper.cpp")
 
-# Optional external GGML source override (OFF by default)
-option(GGML_HOME "Path to external GGML source. Leave empty to use bundled GGML." OFF)
+if (EXISTS "${LOCAL_WHISPER_CPP}/src/whisper.cpp")
+    set(WHISPER_LIB_DIR "${LOCAL_WHISPER_CPP}")
+elseif (EXISTS "${LOCAL_WHISPER_CORE}/src/whisper.cpp")
+    set(WHISPER_LIB_DIR "${LOCAL_WHISPER_CORE}")
+else()
+    message(FATAL_ERROR "❌ whisper.cpp source not found.
+Checked:
+  ${LOCAL_WHISPER_CPP}
+  ${LOCAL_WHISPER_CORE}
+Make sure submodule is cloned (git submodule update --init --recursive).")
+endif()
+
+message(STATUS "📂 Using whisper.cpp directory: ${WHISPER_LIB_DIR}")
+
+# Optional external GGML path
+option(GGML_HOME "Path to external GGML source (optional)." OFF)
 
 # ------------------------------------------------------------
-# Source list
+# Source files
 # ------------------------------------------------------------
 set(SOURCE_FILES
-        "${WHISPER_LIB_DIR}/src/whisper.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/whisperLib.c"
+    "${WHISPER_LIB_DIR}/src/whisper.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/WhisperLib.c"
 )
 
-# ------------------------------------------------------------
-# Internal GGML fallback (bundled source)
-# ------------------------------------------------------------
 if (NOT GGML_HOME)
     list(APPEND SOURCE_FILES
-            "${WHISPER_LIB_DIR}/ggml/src/ggml.c"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-alloc.c"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-backend.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-backend-reg.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-quants.c"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-threading.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-aarch64.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-hbm.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-quants.c"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-traits.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/binary-ops.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/vec.cpp"
-            "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ops.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml.c"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-alloc.c"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-backend.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-backend-reg.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-quants.c"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-threading.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-aarch64.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-hbm.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-quants.c"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ggml-cpu-traits.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/binary-ops.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/vec.cpp"
+        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu/ops.cpp"
     )
 endif()
 
-# Verify that all sources exist before proceeding
+# ------------------------------------------------------------
+# Source existence verification (debug safety)
+# ------------------------------------------------------------
+set(MISSING_FILES "")
 foreach(src IN LISTS SOURCE_FILES)
     if (NOT EXISTS "${src}")
-        message(FATAL_ERROR "❌ Missing source file: ${src}")
+        list(APPEND MISSING_FILES "${src}")
     endif()
 endforeach()
+
+if (MISSING_FILES)
+    message(FATAL_ERROR "❌ Missing source files:\n${MISSING_FILES}")
+endif()
 
 # ------------------------------------------------------------
 # Include paths
 # ------------------------------------------------------------
 add_library(ggml_interface INTERFACE)
 target_include_directories(ggml_interface INTERFACE
-        "${WHISPER_LIB_DIR}"
-        "${WHISPER_LIB_DIR}/src"
-        "${WHISPER_LIB_DIR}/include"
-        "${WHISPER_LIB_DIR}/ggml/include"
-        "${WHISPER_LIB_DIR}/ggml/src"
-        "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu"
+    "${WHISPER_LIB_DIR}"
+    "${WHISPER_LIB_DIR}/src"
+    "${WHISPER_LIB_DIR}/include"
+    "${WHISPER_LIB_DIR}/ggml/include"
+    "${WHISPER_LIB_DIR}/ggml/src"
+    "${WHISPER_LIB_DIR}/ggml/src/ggml-cpu"
 )
 
 # ------------------------------------------------------------
@@ -89,14 +107,7 @@ find_library(LOG_LIB log REQUIRED)
 find_library(ANDROID_LIB android REQUIRED)
 
 # ------------------------------------------------------------
-# Function: build_library(<target_name>)
-# ------------------------------------------------------------
-# Builds one JNI .so library for whisper.cpp.
-# Includes:
-#   • CPU backend definition (GGML_USE_CPU)
-#   • Architecture tuning flags
-#   • Aggressive optimization (O3 + LTO + gc-sections)
-#   • Android log + ggml linkage
+# Build function per ABI
 # ------------------------------------------------------------
 function(build_library target_name)
     add_library(${target_name} SHARED ${SOURCE_FILES})
@@ -109,32 +120,32 @@ function(build_library target_name)
         target_compile_options(${target_name} PRIVATE -mfpu=neon-vfpv4 -mfloat-abi=softfp)
     endif()
 
-    # Release optimizations
+    # Release optimization flags
     if (NOT ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
         target_compile_options(${target_name} PRIVATE
-                -O3 -fvisibility=hidden -fvisibility-inlines-hidden
-                -ffunction-sections -fdata-sections
+            -O3 -fvisibility=hidden -fvisibility-inlines-hidden
+            -ffunction-sections -fdata-sections
         )
         target_link_options(${target_name} PRIVATE
-                -Wl,--gc-sections -Wl,--exclude-libs,ALL -flto
+            -Wl,--gc-sections -Wl,--exclude-libs,ALL -flto
         )
+    else()
+        target_compile_options(${target_name} PRIVATE -O0 -g)
     endif()
 
     # Link libraries
     target_link_libraries(${target_name} PRIVATE ${LOG_LIB} ${ANDROID_LIB} ggml_interface)
 
-    # External GGML integration (optional)
+    # Optional external GGML
     if (GGML_HOME)
         target_include_directories(${target_name} PRIVATE
-                "${GGML_HOME}" "${GGML_HOME}/include" "${GGML_HOME}/src"
+            "${GGML_HOME}" "${GGML_HOME}/include" "${GGML_HOME}/src"
         )
-        # Uncomment if linking external ggml build
-        # target_link_libraries(${target_name} PRIVATE ggml)
     endif()
 endfunction()
 
 # ------------------------------------------------------------
-# Build per ABI + fallback target
+# Build targets
 # ------------------------------------------------------------
 if (DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
     build_library("whisper_v8fp16_va")
@@ -142,7 +153,14 @@ elseif (DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "armeabi-v7a")
     build_library("whisper_vfpv4")
 endif()
 
-# Always build a generic fallback library
+# Generic fallback build
 build_library("whisper")
 
-message(STATUS "✅ whisper.cpp JNI build configuration completed successfully.")
+# ------------------------------------------------------------
+# Debug summary
+# ------------------------------------------------------------
+message(STATUS "✅ whisper.cpp JNI configuration complete.")
+message(STATUS "🧱 Build type      : ${CMAKE_BUILD_TYPE}")
+message(STATUS "🧩 ABI target      : ${ANDROID_ABI}")
+message(STATUS "📦 whisper.cpp dir : ${WHISPER_LIB_DIR}")
+message(STATUS "📁 Source count    : ${SOURCE_FILES}")
