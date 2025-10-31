@@ -1,10 +1,11 @@
 # =========================================
-# Android / Gradle — Production-Ready .gitignore
+# Android / Gradle — Production-Ready .gitignore (Final, Submodule Safe)
 # -----------------------------------------
 # Notes:
 # - Keep Gradle Wrapper in VCS: gradlew, gradlew.bat, gradle/wrapper/** MUST be committed.
 # - Supports multi-module projects (app/, :feature, :nativelib, etc.).
 # - Prebuilt JNI libs under src/**/jniLibs/** SHOULD be committed; build artifacts should not.
+# - Submodules (e.g., whisper_core) are tracked only by reference (.gitmodules).
 # =========================================
 
 # -----------------------------------------
@@ -152,13 +153,20 @@ nativelib/build/
 nativelib/obj/
 !nativelib/src/
 !nativelib/src/**
-**/third_party/**/build/
-**/third-party/**/build/
 
 # -----------------------------------------
-# Git Submodules
+# Submodules (REFERENCE ONLY)
 # -----------------------------------------
+# Always track submodule references, not contents.
 !.gitmodules
+# Submodule placeholder — contents ignored
+nativelib/whisper_core/*
+!nativelib/whisper_core/.git
+
+# (Add more submodules below if needed)
+# e.g.
+# third_party/ggml/*
+# !third_party/ggml/.git
 
 # -----------------------------------------
 # Optional toolchains (uncomment if used)
