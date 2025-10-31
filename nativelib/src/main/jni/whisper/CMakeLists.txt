@@ -2,18 +2,17 @@ cmake_minimum_required(VERSION 3.10)
 project(whisper_jni LANGUAGES C CXX)
 
 # ============================================================
-# ✅ whisper.cpp — Android JNI Build Script (Final Debug Edition)
+# ✅ whisper.cpp — Android JNI Build Script (Ultimate Stable Edition)
 # ------------------------------------------------------------
-# • Compatible with both local + CI (GitHub Actions)
-# • Auto-detects whisper.cpp path (handles whisper_core OR whisper.cpp)
-# • Verifies source existence before configure
-# • Provides per-ABI optimized builds (arm64-v8a / armeabi-v7a)
-# • Aggressive optimizations + LTO + gc-sections
-# • Clang 19 (NDK 28) safe
+# • Works in both local + CI (GitHub Actions)
+# • Auto-detects whisper.cpp source even if nested or missing
+# • Auto-clones whisper.cpp if not found
+# • Supports arm64-v8a / armeabi-v7a builds
+# • Optimized for NDK 28 (Clang 19)
 # ============================================================
 
 # ------------------------------------------------------------
-# Compiler configuration
+# Compiler setup
 # ------------------------------------------------------------
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -22,30 +21,54 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # ------------------------------------------------------------
-# Directory detection logic
+# Path detection (CI-safe)
 # ------------------------------------------------------------
-set(LOCAL_WHISPER_CORE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper_core")
-set(LOCAL_WHISPER_CPP  "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper.cpp")
+set(ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../..")
+set(CANDIDATE_PATHS
+    "${ROOT_DIR}/whisper.cpp"
+    "${ROOT_DIR}/nativelib/../../whisper.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../whisper.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../whisper_core"
+)
 
-if (EXISTS "${LOCAL_WHISPER_CPP}/src/whisper.cpp")
-    set(WHISPER_LIB_DIR "${LOCAL_WHISPER_CPP}")
-elseif (EXISTS "${LOCAL_WHISPER_CORE}/src/whisper.cpp")
-    set(WHISPER_LIB_DIR "${LOCAL_WHISPER_CORE}")
-else()
-    message(FATAL_ERROR "❌ whisper.cpp source not found.
+set(WHISPER_LIB_DIR "")
+foreach(path IN LISTS CANDIDATE_PATHS)
+    if (EXISTS "${path}/src/whisper.cpp")
+        set(WHISPER_LIB_DIR "${path}")
+        break()
+    endif()
+endforeach()
+
+# ------------------------------------------------------------
+# Auto-clone fallback (for CI)
+# ------------------------------------------------------------
+if (NOT WHISPER_LIB_DIR)
+    message(WARNING "⚠️ whisper.cpp not found, attempting to clone...")
+    execute_process(
+        COMMAND git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git
+        WORKING_DIRECTORY ${ROOT_DIR}
+    )
+    if (EXISTS "${ROOT_DIR}/whisper.cpp/src/whisper.cpp")
+        set(WHISPER_LIB_DIR "${ROOT_DIR}/whisper.cpp")
+        message(STATUS "✅ whisper.cpp restored via auto-clone.")
+    else()
+        message(FATAL_ERROR "❌ whisper.cpp source not found.
 Checked:
-  ${LOCAL_WHISPER_CPP}
-  ${LOCAL_WHISPER_CORE}
-Make sure submodule is cloned (git submodule update --init --recursive).")
+  ${CANDIDATE_PATHS}
+Please ensure submodules or network clone access are configured.")
+    endif()
 endif()
 
 message(STATUS "📂 Using whisper.cpp directory: ${WHISPER_LIB_DIR}")
 
+# ------------------------------------------------------------
 # Optional external GGML path
+# ------------------------------------------------------------
 option(GGML_HOME "Path to external GGML source (optional)." OFF)
 
 # ------------------------------------------------------------
-# Source files
+# Source list
 # ------------------------------------------------------------
 set(SOURCE_FILES
     "${WHISPER_LIB_DIR}/src/whisper.cpp"
@@ -74,7 +97,7 @@ if (NOT GGML_HOME)
 endif()
 
 # ------------------------------------------------------------
-# Source existence verification (debug safety)
+# Verify all sources exist
 # ------------------------------------------------------------
 set(MISSING_FILES "")
 foreach(src IN LISTS SOURCE_FILES)
@@ -107,7 +130,7 @@ find_library(LOG_LIB log REQUIRED)
 find_library(ANDROID_LIB android REQUIRED)
 
 # ------------------------------------------------------------
-# Build function per ABI
+# Function to build per-ABI targets
 # ------------------------------------------------------------
 function(build_library target_name)
     add_library(${target_name} SHARED ${SOURCE_FILES})
@@ -120,7 +143,7 @@ function(build_library target_name)
         target_compile_options(${target_name} PRIVATE -mfpu=neon-vfpv4 -mfloat-abi=softfp)
     endif()
 
-    # Release optimization flags
+    # Release optimization
     if (NOT ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
         target_compile_options(${target_name} PRIVATE
             -O3 -fvisibility=hidden -fvisibility-inlines-hidden
@@ -133,10 +156,10 @@ function(build_library target_name)
         target_compile_options(${target_name} PRIVATE -O0 -g)
     endif()
 
-    # Link libraries
+    # Link libs
     target_link_libraries(${target_name} PRIVATE ${LOG_LIB} ${ANDROID_LIB} ggml_interface)
 
-    # Optional external GGML
+    # External GGML
     if (GGML_HOME)
         target_include_directories(${target_name} PRIVATE
             "${GGML_HOME}" "${GGML_HOME}/include" "${GGML_HOME}/src"
@@ -145,19 +168,24 @@ function(build_library target_name)
 endfunction()
 
 # ------------------------------------------------------------
-# Build targets
+# Build targets per ABI
 # ------------------------------------------------------------
-if (DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
-    build_library("whisper_v8fp16_va")
-elseif (DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "armeabi-v7a")
-    build_library("whisper_vfpv4")
+if (DEFINED ANDROID_ABI)
+    if (ANDROID_ABI STREQUAL "arm64-v8a")
+        build_library("whisper_v8fp16_va")
+    elseif (ANDROID_ABI STREQUAL "armeabi-v7a")
+        build_library("whisper_vfpv4")
+    else()
+        message(WARNING "⚠️ Unknown ABI: ${ANDROID_ABI}, using generic target.")
+        build_library("whisper_generic")
+    endif()
+else()
+    # Fallback for local builds
+    build_library("whisper_generic")
 endif()
 
-# Generic fallback build
-build_library("whisper")
-
 # ------------------------------------------------------------
-# Debug summary
+# Summary
 # ------------------------------------------------------------
 message(STATUS "✅ whisper.cpp JNI configuration complete.")
 message(STATUS "🧱 Build type      : ${CMAKE_BUILD_TYPE}")
