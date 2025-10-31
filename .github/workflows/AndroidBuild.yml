@@ -12,7 +12,7 @@ on:
         default: true
       ndk_version:
         description: "Android NDK version"
-        default: "28.0.12433566" # ✅ Updated to NDK 28 (Clang 19)
+        default: "28.0.12433566" # ✅ NDK 28 (Clang 19)
 
 permissions:
   contents: write
@@ -28,6 +28,7 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     env:
       MODULE_PATH: ${{ inputs.module || 'app' }}
@@ -53,12 +54,24 @@ jobs:
       - name: Ensure submodules initialized
         run: |
           echo "🔍 Checking submodules..."
+          git config --global --add safe.directory '*'
           git submodule sync --recursive
           git submodule update --init --recursive
           echo "✅ Submodule list:"
           git submodule status || true
-          echo "🧱 whisper.cpp directory structure:"
-          ls -R whisper.cpp || echo "⚠️ whisper.cpp not found"
+          echo "🧱 whisper.cpp directory structure (top 3 levels):"
+          find whisper.cpp -maxdepth 3 -type d -print || echo "⚠️ whisper.cpp not found"
+
+          if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
+            echo "::error::whisper.cpp/src/whisper.cpp missing — submodule not cloned properly."
+            echo "Attempting manual clone as fallback..."
+            git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp || true
+            if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
+              echo "::error::Failed to restore whisper.cpp. Please check GH_TOKEN or submodule URL."
+              exit 1
+            fi
+            echo "✅ whisper.cpp restored via fallback clone."
+          fi
 
       # -----------------------------------------------
       # 🔧 Environment setup
@@ -86,14 +99,13 @@ jobs:
           echo "✅ Android SDK/NDK installation complete."
 
       # -----------------------------------------------
-      # 🧰 Gradle & properties configuration
+      # 🧰 Gradle configuration
       # -----------------------------------------------
       - name: Configure Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
       - name: Write gradle.properties
         run: |
-          [[ -n "${{ secrets.GH_TOKEN }}" ]] || { echo "::error ::GH_TOKEN missing"; exit 1; }
           mkdir -p "$HOME/.gradle"
           cat <<'PROPS' > "$HOME/.gradle/gradle.properties"
           gh.owner=ishizuki-tech
@@ -102,13 +114,16 @@ jobs:
           gh.pathPrefix=exports
           gh.token=${{ secrets.GH_TOKEN }}
           HF_TOKEN=${{ secrets.HF_TOKEN }}
+          org.gradle.daemon=false
+          org.gradle.parallel=true
+          org.gradle.jvmargs=-Xmx4g
           PROPS
           echo "✅ gradle.properties configured."
 
       # -----------------------------------------------
-      # 🔐 Signing setup
+      # 🔐 Keystore setup
       # -----------------------------------------------
-      - name: Decode keystore
+      - name: Decode signing keystore
         if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
         run: |
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
@@ -116,23 +131,24 @@ jobs:
           echo "✅ Keystore decoded."
 
       # -----------------------------------------------
-      # 🏗️ CMake Debug Stage (check whisper.cpp existence)
+      # 🏗️ Verify CMake & whisper.cpp sources
       # -----------------------------------------------
-      - name: Verify CMake whisper.cpp paths
+      - name: Verify CMake whisper.cpp path
         run: |
-          echo "🔍 CMake source verification:"
-          WHISPER_CPP_PATH="nativelib/src/main/jni/whisper/../../../../whisper.cpp/src/whisper.cpp"
-          if [[ -f "$WHISPER_CPP_PATH" ]]; then
-            echo "✅ Found: $WHISPER_CPP_PATH"
+          echo "🔍 Verifying whisper.cpp source existence..."
+          TARGET="nativelib/src/main/jni/whisper/../../../../whisper.cpp/src/whisper.cpp"
+          if [[ -f "$TARGET" ]]; then
+            echo "✅ Found: $TARGET"
           else
-            echo "❌ Not found: $WHISPER_CPP_PATH"
-            echo "Submodules are likely missing."
-            git submodule status
+            echo "::error::❌ Missing whisper.cpp/src/whisper.cpp"
+            echo "Listing current directories:"
+            ls -R nativelib/src/main/jni/whisper || true
+            ls -R whisper.cpp || true
             exit 1
           fi
 
       # -----------------------------------------------
-      # 🧠 Build with Gradle (includes CMake)
+      # 🧠 Build (CMake + Gradle)
       # -----------------------------------------------
       - name: Build release artifacts
         run: |
@@ -145,7 +161,7 @@ jobs:
           echo "✅ Build completed successfully."
 
       # -----------------------------------------------
-      # 📦 Collect outputs
+      # 📦 Collect build outputs
       # -----------------------------------------------
       - name: Collect build outputs
         id: collect
@@ -205,7 +221,7 @@ jobs:
           retention-days: 14
 
       # -----------------------------------------------
-      # 🧩 Version & tag derivation
+      # 🧩 Derive version & tag
       # -----------------------------------------------
       - name: Derive version name
         id: version
@@ -223,9 +239,9 @@ jobs:
           echo "🏷️  Tag generated: $TAG"
 
       # -----------------------------------------------
-      # 📝 Release publishing
+      # 📝 Prepare & Publish Release
       # -----------------------------------------------
-      - name: Prepare release body
+      - name: Prepare release notes
         id: notes
         run: |
           NOTES=$(git log -10 --pretty='* %s (%an)')
