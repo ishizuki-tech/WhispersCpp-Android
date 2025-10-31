@@ -14,25 +14,41 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Single-threaded WAV recorder.
- * - Deterministic state machine: Idle → Starting → Recording → Stopping → Idle
- * - Unblocks AudioRecord.read() on stop() to flush PCM then writes a valid WAV header
- * - Resilient to rapid Record→Stop taps; Start while Starting/Recording is ignored
+ * High-reliability single-threaded WAV recorder.
+ *
+ * State machine:
+ *   Idle → Starting → Recording → Stopping → Idle
+ *
+ * Technical highlights:
+ *  • Dedicated single thread + coroutine scope ensures sequential audio operations.
+ *  • Writes temporary PCM → rewrites valid RIFF/WAVE header upon stop().
+ *  • Supports rapid Record→Stop taps without race conditions.
+ *  • Uses atomic state and AudioRecord release safety.
+ *
+ * Typical lifecycle:
+ *   startRecording(File)
+ *   stopRecording()  // suspending
+ *   close()          // on ViewModel/Activity teardown
  */
 class Recorder(
     private val context: Context,
     private val onError: (Exception) -> Unit
 ) : Closeable {
 
+    // -------------------------------------------------------------------------
+    // Dedicated single-thread execution context
+    // -------------------------------------------------------------------------
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "RecorderThread").apply { priority = Thread.NORM_PRIORITY }
     }
     private val dispatcher = executor.asCoroutineDispatcher()
     private val scope = CoroutineScope(dispatcher + SupervisorJob())
 
+    // -------------------------------------------------------------------------
+    // Internal state
+    // -------------------------------------------------------------------------
     private var job: Job? = null
     private val activeRecorder = AtomicReference<AudioRecord?>(null)
-
     private var tempPcm: File? = null
     private var targetWav: File? = null
     private var cfg: Config? = null
@@ -45,13 +61,22 @@ class Recorder(
         else -> false
     }
 
-    /** Start recording on a dedicated single thread (idempotent & race-free). */
+    // -------------------------------------------------------------------------
+    // Start Recording
+    // -------------------------------------------------------------------------
+    /**
+     * Starts recording in a deterministic, race-free manner.
+     * Idempotent — calling during active/starting state is ignored.
+     *
+     * @param output target WAV file (will be overwritten)
+     * @param rates prioritized sample rate candidates
+     */
     fun startRecording(
         output: File,
         rates: IntArray = intArrayOf(16_000, 48_000, 44_100)
     ) {
         if (!state.compareAndSet(State.Idle, State.Starting)) {
-            Log.w(TAG, "startRecording: ignored, state=${state.get()}")
+            Log.w(TAG, "startRecording ignored: current=${state.get()}")
             return
         }
         targetWav = output
@@ -67,11 +92,10 @@ class Recorder(
                     rec.release(); error("AudioRecord init failed")
                 }
 
+                // Abort early if user already stopped before init finished
                 if (state.get() != State.Starting) {
-                    Log.w(TAG, "startRecording: aborted (state=${state.get()}) before start")
-                    rec.release()
-                    cleanup()
-                    state.set(State.Idle)
+                    Log.w(TAG, "startRecording aborted: premature stop, state=${state.get()}")
+                    rec.release(); cleanup(); state.set(State.Idle)
                     return@launch
                 }
 
@@ -80,19 +104,22 @@ class Recorder(
                 val tmp = tempPcm!!
 
                 state.set(State.Recording)
+
+                // Writer coroutine: blocking read() loop → PCM write → stop
                 job = launch {
                     FileOutputStream(tmp).use { fos ->
                         val bos = BufferedOutputStream(fos, conf.bufferSize)
                         val shortBuf = ShortArray(conf.bufferSize / 2)
-                        val byteBuf = ByteArray(shortBuf.size * 2) // reused
+                        val byteBuf = ByteArray(shortBuf.size * 2)
 
                         try {
                             rec.startRecording()
                             Log.i(TAG, "🎙 start ${conf.sampleRate}Hz buf=${conf.bufferSize}")
+
                             while (isActive) {
-                                val n = rec.read(shortBuf, 0, shortBuf.size) // blocking
+                                val n = rec.read(shortBuf, 0, shortBuf.size)
                                 if (n <= 0) {
-                                    if (n < 0) Log.w(TAG, "read() error=$n; break")
+                                    if (n < 0) Log.w(TAG, "read() error=$n → break")
                                     break
                                 }
                                 var j = 0
@@ -108,7 +135,7 @@ class Recorder(
                             runCatching { rec.stop() }
                             runCatching { rec.release() }
                             activeRecorder.compareAndSet(rec, null)
-                            Log.i(TAG, "🎙 stopped & released")
+                            Log.i(TAG, "🎙 stopped & released (writer exit)")
                         }
                     }
                 }
@@ -124,63 +151,79 @@ class Recorder(
         }
     }
 
-    /** Stop recording: unblock read(), join writer, then write a valid WAV header. */
+    // -------------------------------------------------------------------------
+    // Stop Recording
+    // -------------------------------------------------------------------------
+    /**
+     * Stops recording and finalizes the WAV file.
+     *
+     * Steps:
+     *  1. Unblock AudioRecord.read() via stop()
+     *  2. Cancel & join writer coroutine
+     *  3. Write valid RIFF/WAV header to target file
+     *  4. Cleanup temp PCM and reset state
+     */
     suspend fun stopRecording() = withContext(Dispatchers.IO) {
-        Log.d("Recorder", "stopRecording() invoked (state=${state.get()})")
+        Log.d(TAG, "stopRecording() invoked (state=${state.get()})")
 
         val s = state.get()
         if (s == State.Idle) {
-            Log.w("Recorder", "stopRecording: already idle")
+            Log.w(TAG, "stopRecording: already idle")
             return@withContext
         }
         if (s == State.Starting || s == State.Recording) {
             state.set(State.Stopping)
         }
 
+        // Stop AudioRecord (non-blocking safety)
         activeRecorder.getAndSet(null)?.let {
-            Log.d("Recorder", "Calling it.stop() ...")
-            runCatching { it.stop() }.onFailure { Log.w("Recorder", "stop() failed: $it") }
-            Log.d("Recorder", "it.stop() returned")
+            Log.d(TAG, "Calling AudioRecord.stop() ...")
+            runCatching { it.stop() }.onFailure { Log.w(TAG, "stop() failed: $it") }
+            runCatching { it.release() }
         }
 
         try {
-            // 💥 強制キャンセル + join
+            // Cancel writer job gracefully and await completion
             job?.cancel()
-            Log.d("Recorder", "Joining writer job ...")
+            Log.d(TAG, "Joining writer job ...")
             job?.join()
-            Log.d("Recorder", "Writer job joined successfully")
+            Log.d(TAG, "Writer job joined successfully")
 
             val pcm = tempPcm
             val wav = targetWav
             val c = cfg
-            Log.d("Recorder", "post-join: pcm=$pcm wav=$wav cfg=$c")
+            Log.d(TAG, "post-join: pcm=$pcm wav=$wav cfg=$c")
 
             if (pcm == null || wav == null || c == null) {
-                Log.w("Recorder", "stopRecording: missing pieces")
+                Log.w(TAG, "stopRecording: missing pieces (aborting WAV write)")
                 state.set(State.Idle)
                 return@withContext
             }
 
+            // Write WAV header and merge PCM payload
             writeWavFromPcm(pcm, wav, c.sampleRate, 1, 16)
-            Log.d("Recorder", "WAV header written")
+            Log.d(TAG, "WAV header written")
 
             if (wav.length() <= 44L) {
-                Log.w("Recorder", "WAV too short (<=44) deleting: ${wav.path}")
+                Log.w(TAG, "WAV too short (<=44 bytes), deleting: ${wav.path}")
                 wav.delete()
             } else {
-                Log.i("Recorder", "✅ WAV written ${wav.path} (${wav.length()} bytes)")
+                Log.i(TAG, "✅ WAV finalized: ${wav.path} (${wav.length()} bytes)")
             }
         } catch (e: Exception) {
-            Log.e("Recorder", "stopRecording error", e)
+            Log.e(TAG, "stopRecording error", e)
             onError(e)
         } finally {
             cleanup()
             state.set(State.Idle)
-            Log.d("Recorder", "Cleanup done, state reset to Idle")
+            Log.d(TAG, "Cleanup complete, state=Idle")
         }
     }
 
-    // ----------------------------- internals -----------------------------
+    // -------------------------------------------------------------------------
+    // Internal Helpers
+    // -------------------------------------------------------------------------
+    /** Writes RIFF/WAVE header + PCM data → valid WAV file. */
     private fun writeWavFromPcm(pcm: File, wav: File, rate: Int, ch: Int, bits: Int) {
         val size = pcm.length().toInt().coerceAtLeast(0)
         val byteRate = rate * ch * bits / 8
@@ -205,22 +248,22 @@ class Recorder(
         write((v ushr 16) and 0xFF); write((v ushr 24) and 0xFF)
     }
 
+    /** Deletes temporary files and resets cached config. */
     private fun cleanup() {
         runCatching { tempPcm?.delete() }
-        tempPcm = null
-        targetWav = null
-        cfg = null
-        job = null
+        tempPcm = null; targetWav = null; cfg = null; job = null
     }
 
+    /** Validates microphone presence and permission. */
     private fun checkPermission() {
         if (!context.packageManager.hasSystemFeature(PackageManager.FEATURE_MICROPHONE))
-            error("No microphone")
+            error("No microphone present on device")
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
-        ) throw SecurityException("RECORD_AUDIO not granted")
+        ) throw SecurityException("RECORD_AUDIO permission not granted")
     }
 
+    /** Audio configuration container. */
     private data class Config(
         val sampleRate: Int,
         val channelMask: Int,
@@ -228,6 +271,10 @@ class Recorder(
         val bufferSize: Int
     )
 
+    /**
+     * Iterates candidate sample rates, returns first working AudioRecord config.
+     * Uses minimal buffer to reduce latency for short clips.
+     */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun findConfig(rates: IntArray): Config? {
         val ch = AudioFormat.CHANNEL_IN_MONO
@@ -238,20 +285,24 @@ class Recorder(
             val test = AudioRecord(MediaRecorder.AudioSource.MIC, r, ch, fmt, minBuf)
             val ok = test.state == AudioRecord.STATE_INITIALIZED
             test.release()
-            if (ok) {
-                // Use minimal buffer to reduce start latency for short clips
-                val buffer = minBuf
-                return Config(r, ch, fmt, buffer)
-            }
+            if (ok) return Config(r, ch, fmt, minBuf)
         }
         return null
     }
 
+    /** Builds a new AudioRecord instance. */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun buildRecorder(c: Config) = AudioRecord(
         MediaRecorder.AudioSource.MIC, c.sampleRate, c.channelMask, c.format, c.bufferSize
     )
 
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
+    /**
+     * Safely stops recording and releases resources.
+     * Blocks until cleanup is complete.
+     */
     override fun close() {
         runBlocking { if (isActive()) stopRecording() }
         runCatching { dispatcher.close() }

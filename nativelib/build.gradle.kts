@@ -1,4 +1,14 @@
 // file: whisper/build.gradle.kts
+// ============================================================
+// ✅ whisper.cpp JNI Library Module — Gradle 8.13 / Kotlin 2.2 Compatible
+// ------------------------------------------------------------
+// • Uses compilerOptions DSL
+// • Uses correct externalNativeBuild CMake args under defaultConfig
+// • Fully compatible with AGP 8.13.0 and Kotlin 2.2.20
+// ============================================================
+
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
@@ -11,23 +21,32 @@ android {
     defaultConfig {
         minSdk = 26
 
+        // ABI filter
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
 
         consumerProguardFiles("consumer-rules.pro")
+
+        // ✅ Correct location for CMake arguments (under defaultConfig)
+        @Suppress("UnstableApiUsage")
+        externalNativeBuild {
+            cmake {
+                arguments(
+                    "-DANDROID_STL=c++_shared",
+                    project.findProperty("GGML_HOME")?.let { "-DGGML_HOME=$it" } ?: "-DGGML_HOME="
+                )
+            }
+        }
     }
 
     buildTypes {
         debug {
             isMinifyEnabled = false
-            // 👇 JNI debug symbols are controlled automatically in AGP 8.x
-            // Use: gradlew assembleDebug --debug-jni if needed
             buildConfigField("boolean", "JNI_DEBUG", "true")
         }
         release {
             isMinifyEnabled = false
-            // 👇 No need for renderscriptDebuggable (deprecated)
             buildConfigField("boolean", "JNI_DEBUG", "false")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -41,17 +60,22 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-        freeCompilerArgs += listOf("-Xjvm-default=all", "-opt-in=kotlin.RequiresOptIn")
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+            freeCompilerArgs.addAll(
+                "-Xjvm-default=all",
+                "-opt-in=kotlin.RequiresOptIn"
+            )
+        }
     }
 
     ndkVersion = "28.1.13356709"
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
             java.srcDirs("src/main/java", "src/main/kotlin")
+            jniLibs.srcDirs("src/main/jniLibs")
         }
     }
 
@@ -79,7 +103,7 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.appcompat)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

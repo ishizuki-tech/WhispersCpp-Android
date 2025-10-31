@@ -1,3 +1,22 @@
+/**
+ * Main Screen ViewModel
+ * ----------------------
+ * Central controller for Whisper App's main screen logic.
+ * It manages audio recording, transcription, playback, and record persistence.
+ *
+ * Responsibilities:
+ * - Coordinates UI state with background operations.
+ * - Loads and manages Whisper model context.
+ * - Handles safe recording start/stop via [Recorder].
+ * - Executes offline transcription with Whisper.cpp.
+ * - Persists recording logs and metadata as JSON.
+ *
+ * Threading:
+ * - All UI state mutations run on Main dispatcher.
+ * - File I/O and model loading occur on IO dispatcher.
+ * - Long-running transcription jobs execute on Default dispatcher.
+ */
+
 @file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 
 package com.negi.whispers.ui.main
@@ -23,6 +42,8 @@ import com.negi.whispers.recorder.Recorder
 import com.whispercpp.whisper.WhisperContext
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -32,23 +53,29 @@ import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "MainScreenViewModel"
 
+/**
+ * Provides state and logic for the main Whisper screen.
+ * Manages user recording, transcription, and playback lifecycle.
+ */
 class MainScreenViewModel(private val app: Application) : ViewModel() {
 
-    // --- UI flags ---
+    // ---------------------------------------------------------------------
+    // UI States
+    // ---------------------------------------------------------------------
+
     var canTranscribe by mutableStateOf(false); private set
     var isRecording by mutableStateOf(false); private set
     var isModelLoading by mutableStateOf(false); private set
     var hasAllRequiredPermissions by mutableStateOf(false); private set
-
-    // --- Config ---
     var selectedLanguage by mutableStateOf("en"); private set
     var selectedModel by mutableStateOf("ggml-tiny-q5_1.bin"); private set
     var translateToEnglish by mutableStateOf(false); private set
-
-    // --- Records ---
     var myRecords by mutableStateOf<List<MyRecord>>(emptyList()); private set
 
-    // --- Resources ---
+    // ---------------------------------------------------------------------
+    // Internal Resources
+    // ---------------------------------------------------------------------
+
     private val modelsDir = File(app.filesDir, "models")
     private val recDir = File(app.filesDir, "recordings")
     private var whisperCtx: WhisperContext? = null
@@ -56,14 +83,19 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     private var currentFile: File? = null
 
     private val transcribeJobRef = AtomicReference<Job?>(null)
+    private val saveMutex = Mutex()
+    private val json = Json { prettyPrint = false; ignoreUnknownKeys = true }
+    private var recordStartMs: Long = 0L
+
     private val recorder = Recorder(app) { e ->
         Log.e(TAG, "Recorder error", e)
         isRecording = false
         addToastLog("⛔ Recorder error: ${e.message}")
     }
 
-    private val json = Json { prettyPrint = false; ignoreUnknownKeys = true }
-    private var recordStartMs: Long = 0L
+    // ---------------------------------------------------------------------
+    // Initialization
+    // ---------------------------------------------------------------------
 
     init {
         viewModelScope.launch {
@@ -74,15 +106,16 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         }
         viewModelScope.launch {
             var first = true
-            snapshotFlow { myRecords }.collectLatest {
+            snapshotFlow<List<MyRecord>> { myRecords }.collectLatest {
                 if (first) first = false else saveRecords()
             }
         }
     }
 
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
     // Permissions
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+
     fun getRequiredPermissions(): List<String> {
         val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
@@ -97,20 +130,23 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         Log.d(TAG, "Permissions: $hasAllRequiredPermissions")
     }
 
-    // -------------------------------------------------------------------------
-    // Config
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Configuration
+    // ---------------------------------------------------------------------
+
     fun updateSelectedLanguage(lang: String) { selectedLanguage = lang }
     fun updateTranslate(enable: Boolean) { translateToEnglish = enable }
+
     fun updateSelectedModel(model: String) {
         if (model == selectedModel) return
         selectedModel = model
         viewModelScope.launch { loadModel(model) }
     }
 
-    // -------------------------------------------------------------------------
-    // Model loading
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Model Loading
+    // ---------------------------------------------------------------------
+
     private suspend fun loadModel(model: String) {
         if (isModelLoading) return
         isModelLoading = true
@@ -131,37 +167,29 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Recording start/stop
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Recording Controls
+    // ---------------------------------------------------------------------
+
+    /**
+     * Starts or stops recording.
+     * When stopped, triggers automatic transcription.
+     */
     fun toggleRecord(onScrollToIndex: (Int) -> Unit) =
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            Log.d(TAG, "toggleRecord() invoked: isRecording=$isRecording, isModelLoading=$isModelLoading")
-
             if (isModelLoading) {
                 addToastLog("⏳ Model loading...")
                 return@launch
             }
-
             try {
                 if (isRecording) {
-                    // ----- STOP -----
-                    Log.d(TAG, "STOP block entered (isRecording=true)")
+                    // Stop recording
                     isRecording = false
                     addToastLog("⏹ Stopping...")
-
-                    val minDurationMs = 800L
                     val elapsed = SystemClock.elapsedRealtime() - recordStartMs
-                    if (elapsed < minDurationMs) {
-                        withContext(Dispatchers.IO) { delay(minDurationMs - elapsed) }
-                    }
+                    if (elapsed < 800L) delay(800L - elapsed)
 
-                    // Run stop on IO dispatcher
-                    withContext(Dispatchers.IO) {
-                        Log.d(TAG, "Calling recorder.stopRecording() ...")
-                        recorder.stopRecording()
-                        Log.d(TAG, "recorder.stopRecording() returned")
-                    }
+                    withContext(Dispatchers.IO) { recorder.stopRecording() }
 
                     val file = currentFile
                     currentFile = null
@@ -169,12 +197,8 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
                         addToastLog("⚠️ Recording missing")
                         return@launch
                     }
-                    val len = file.length()
-                    if (len <= 44L) {
-                        val reason =
-                            "WAV too short (<=44B). bytes=$len, elapsed=${elapsed}ms — probably silent or too quick tap."
-                        addToastLog("⚠️ $reason")
-                        Log.w(TAG, reason)
+                    if (file.length() <= 44L) {
+                        addToastLog("⚠️ WAV too short / silent")
                         return@launch
                     }
 
@@ -182,64 +206,89 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
                     val recIndex = myRecords.lastIndex
                     onScrollToIndex(recIndex)
                     addResultLog("🧠 Transcribing...", recIndex)
-
-                    // --- schedule transcription job ---
-                    addResultLog("🧵 Scheduling transcription job for ${file.name}", recIndex)
-                    transcribeJobRef.getAndSet(null)?.cancel()
-                    val job = viewModelScope.launch(Dispatchers.Default) {
-                        Log.d(TAG, "transcribeAudio(): ENTER file=${file.name} idx=$recIndex")
-                        transcribeAudio(file, recIndex)
-                    }
-                    job.invokeOnCompletion { e ->
-                        val msg = if (e == null) "✅ Transcription job completed"
-                        else "⛔ Transcription job failed: ${e.message}"
-                        addResultLog(msg, recIndex)
-                        Log.d(TAG, "transcribeAudio(): EXIT err=$e")
-                    }
-                    transcribeJobRef.set(job)
-
+                    startTranscriptionJob(file, recIndex)
                 } else {
-                    // ----- START -----
-                    Log.d(TAG, "START block entered (isRecording=false)")
+                    // Start recording
                     if (!hasAllRequiredPermissions) {
                         addToastLog("⚠️ Grant microphone permission")
                         return@launch
                     }
                     stopPlayback()
-
                     val file = withContext(Dispatchers.IO) { createNewAudioFile() }
                     currentFile = file
-                    addToastLog("🎙️ Recording started...")
                     recordStartMs = SystemClock.elapsedRealtime()
-                    recorder.startRecording(
-                        output = file,
-                        rates = intArrayOf(16_000, 48_000, 44_100)
-                    )
+                    addToastLog("🎙️ Recording started...")
+                    recorder.startRecording(file, intArrayOf(16_000, 48_000, 44_100))
                     isRecording = true
                 }
-            } catch (ce: CancellationException) {
-                Log.w(TAG, "toggleRecord cancelled", ce)
-                throw ce
             } catch (e: Exception) {
                 Log.e(TAG, "toggleRecord failed", e)
                 isRecording = false
-                addToastLog("⛔ toggleRecord failed: ${e::class.simpleName} ${e.message}")
+                addToastLog("⛔ toggleRecord failed: ${e.message}")
             }
         }
 
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Re-Transcription
+    // ---------------------------------------------------------------------
+
+    private var lastReTranscribeMs = 0L
+
+    /**
+     * Re-runs transcription for an existing record.
+     * Prevents rapid re-trigger with debounce guard.
+     */
+    fun reTranscribe(index: Int) {
+        viewModelScope.launch {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastReTranscribeMs < 1000L) return@launch
+            lastReTranscribeMs = now
+
+            if (isRecording || isModelLoading) {
+                addToastLog("⚠️ Busy (recording or loading)")
+                return@launch
+            }
+
+            if (index !in myRecords.indices) {
+                addToastLog("⚠️ Invalid record index: $index")
+                return@launch
+            }
+
+            val rec = myRecords[index]
+            val file = File(rec.absolutePath)
+            if (!file.exists()) {
+                addResultLog("⛔ Missing file: ${file.name}", index)
+                return@launch
+            }
+
+            addResultLog("🔁 Re-transcribing ${file.name}...", index)
+            startTranscriptionJob(file, index)
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Transcription
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+
+    private fun startTranscriptionJob(file: File, index: Int) {
+        transcribeJobRef.getAndSet(null)?.cancel()
+        val job = viewModelScope.launch(Dispatchers.Default, CoroutineStart.UNDISPATCHED) {
+            transcribeAudio(file, index)
+        }
+        job.invokeOnCompletion { e ->
+            addResultLog(
+                if (e == null) "✅ Transcription completed" else "⛔ Transcription failed: ${e.message}",
+                index
+            )
+        }
+        transcribeJobRef.set(job)
+    }
+
     private suspend fun transcribeAudio(file: File, index: Int = -1) {
         val ctx = whisperCtx ?: run {
             addResultLog("⛔ Model not loaded", index)
             return
         }
-
-        if (!canTranscribe) {
-            addResultLog("ℹ️ Busy flag was true, proceeding anyway", index)
-        }
-
         canTranscribe = false
         try {
             val samples = withContext(Dispatchers.IO) { decodeWaveFile(file) }
@@ -247,37 +296,30 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
                 addResultLog("⛔ No audio samples", index)
                 return
             }
-
             val start = System.currentTimeMillis()
-            val text = ctx.transcribeData(
-                data = samples,
-                lang = selectedLanguage,
-                translate = translateToEnglish
-            ) ?: "(no result)"
+            val text = ctx.transcribeData(samples, selectedLanguage, translateToEnglish)
+                ?: "(no result)"
             val elapsed = System.currentTimeMillis() - start
-
             addResultLog(
-                buildString {
-                    appendLine("✅ Transcribed (${elapsed} ms)")
-                    appendLine("Model: $selectedModel")
-                    appendLine("Lang: $selectedLanguage${if (translateToEnglish) "→en" else ""}")
-                    appendLine()
-                    append(text)
-                },
-                index
+                """
+                ✅ Transcribed (${elapsed} ms)
+                Model: $selectedModel
+                Lang: $selectedLanguage${if (translateToEnglish) "→en" else ""}
+                $text
+                """.trimIndent(), index
             )
-            Log.i(TAG, "Transcribed in ${elapsed}ms, samples=${samples.size}")
         } catch (e: Exception) {
             Log.e(TAG, "Transcribe failed", e)
-            addResultLog("⛔ Transcribe failed: ${e::class.simpleName}: ${e.message}", index)
+            addResultLog("⛔ Transcribe failed: ${e.message}", index)
         } finally {
             canTranscribe = true
         }
     }
 
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
     // Playback
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+
     fun playRecording(path: String, index: Int) = viewModelScope.launch {
         if (isRecording) return@launch
         val f = File(path)
@@ -290,9 +332,9 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         addResultLog("▶ Playing: ${f.name}", index)
     }
 
-    private suspend fun startPlayback(f: File) = withContext(Dispatchers.Main) {
+    private suspend fun startPlayback(f: File) = withContext(Dispatchers.Main.immediate) {
         releaseMediaPlayer()
-        mediaPlayer = MediaPlayer.create(app, f.absolutePath.toUri()).apply {
+        mediaPlayer = MediaPlayer.create(app, f.absolutePath.toUri())?.apply {
             setOnCompletionListener {
                 runCatching { stop() }
                 runCatching { release() }
@@ -302,18 +344,19 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         }
     }
 
-    private suspend fun stopPlayback() = withContext(Dispatchers.Main) {
+    suspend fun stopPlayback() = withContext(Dispatchers.Main.immediate) {
         releaseMediaPlayer()
     }
 
-    // -------------------------------------------------------------------------
-    // Record management & persistence
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Record Management
+    // ---------------------------------------------------------------------
+
     fun removeRecordAt(index: Int) {
         if (index !in myRecords.indices) return
         runCatching { File(myRecords[index].absolutePath).delete() }
         myRecords = myRecords.toMutableList().apply { removeAt(index) }
-        addToastLog("🗑 Recording #$index deleted")
+        addToastLog("🗑 Deleted recording #$index")
     }
 
     private fun addNewRecordingLog(name: String, path: String) {
@@ -334,30 +377,36 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         myRecords = (myRecords + MyRecord(msg, "")).takeLast(200)
     }
 
-    fun saveRecords() = runCatching {
-        File(app.filesDir, "records.json").writeText(
-            json.encodeToString(ListSerializer(MyRecordSerializer), myRecords)
-        )
-    }.onFailure { Log.e(TAG, "Save failed", it) }
-
-    private fun loadRecords() = runCatching {
-        val f = File(app.filesDir, "records.json")
-        if (f.exists()) {
-            myRecords = json.decodeFromString(ListSerializer(MyRecordSerializer), f.readText())
+    suspend fun saveRecords() = withContext(NonCancellable + Dispatchers.IO) {
+        saveMutex.withLock {
+            runCatching {
+                File(app.filesDir, "records.json").writeText(
+                    json.encodeToString(ListSerializer(MyRecordSerializer), myRecords)
+                )
+            }.onFailure { Log.e(TAG, "Save failed", it) }
         }
-    }.onFailure { Log.e(TAG, "Load failed", it) }
+    }
 
-    // -------------------------------------------------------------------------
-    // FS / cleanup
-    // -------------------------------------------------------------------------
+    private suspend fun loadRecords() = withContext(Dispatchers.IO) {
+        runCatching {
+            val f = File(app.filesDir, "records.json")
+            if (f.exists()) {
+                myRecords = json.decodeFromString(ListSerializer(MyRecordSerializer), f.readText())
+            }
+        }.onFailure { Log.e(TAG, "Load failed", it) }
+    }
+
+    // ---------------------------------------------------------------------
+    // Filesystem & Cleanup
+    // ---------------------------------------------------------------------
+
     private suspend fun createNewAudioFile(): File {
-        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         return File(recDir, "rec_$ts.wav")
     }
 
     private suspend fun setupDirs() = withContext(Dispatchers.IO) {
-        modelsDir.mkdirs()
-        recDir.mkdirs()
+        modelsDir.mkdirs(); recDir.mkdirs()
     }
 
     private suspend fun releaseWhisper() = withContext(Dispatchers.IO) {
@@ -365,7 +414,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         whisperCtx = null
     }
 
-    private suspend fun releaseMediaPlayer() = withContext(Dispatchers.Main) {
+    private suspend fun releaseMediaPlayer() = withContext(Dispatchers.Main.immediate) {
         runCatching { mediaPlayer?.stop() }
         runCatching { mediaPlayer?.release() }
         mediaPlayer = null
@@ -378,7 +427,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
             withContext(NonCancellable) {
                 releaseWhisper()
                 releaseMediaPlayer()
-                recorder.close()
+                runCatching { recorder.close() }
             }
         }
     }

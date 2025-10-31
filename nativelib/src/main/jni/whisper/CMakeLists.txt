@@ -1,23 +1,39 @@
 cmake_minimum_required(VERSION 3.10)
+project(whisper.cpp LANGUAGES C CXX)
 
-project(whisper.cpp)
+# ============================================================
+# ✅ whisper.cpp — Android JNI Build Script (Reviewed Version)
+# ------------------------------------------------------------
+# • Builds JNI shared libraries for whisper.cpp
+# • Supports multiple ABI-specific optimized variants
+# • Auto-switches between internal GGML and external GGML source
+# • Enables aggressive compiler and linker optimization flags
+# ============================================================
 
-# C++17を使用
+# Use C++17 standard for compatibility with whisper.cpp / ggml
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# whisper_core のパス（JNIからの相対パス）
+# Base path for whisper.cpp core sources (relative to JNI folder)
 set(WHISPER_LIB_DIR ${CMAKE_SOURCE_DIR}/../../../../whisper_core/)
 
-# 外部GGMLの使用をオプション化（指定がなければ内部GGMLを使う）
+# Optional external GGML directory (if not set, internal GGML will be used)
 option(GGML_HOME "whisper: Path to external GGML source" OFF)
 
-# whisperのソースコードとJNIブリッジを設定
+# ------------------------------------------------------------
+# Source file list
+# ------------------------------------------------------------
+# Includes:
+#   - whisper core implementation (whisper.cpp)
+#   - JNI bridge entry point (jni.c)
 set(SOURCE_FILES
         ${WHISPER_LIB_DIR}/src/whisper.cpp
-        ${CMAKE_SOURCE_DIR}/jni.c
+        ${CMAKE_SOURCE_DIR}/whisperLib.c
 )
 
-# 内部GGML使用時のソースを追加
+# ------------------------------------------------------------
+# Internal GGML source (if external not specified)
+# ------------------------------------------------------------
 if (NOT GGML_HOME)
     list(APPEND SOURCE_FILES
             ${WHISPER_LIB_DIR}/ggml/src/ggml.c
@@ -39,10 +55,14 @@ if (NOT GGML_HOME)
     )
 endif()
 
-# Androidログ用ライブラリを探す
+# ------------------------------------------------------------
+# Locate Android logging library
+# ------------------------------------------------------------
 find_library(LOG_LIB log)
 
-# INTERFACEライブラリでGGMLのインクルードパスをまとめる
+# ------------------------------------------------------------
+# Create an INTERFACE library for common include directories
+# ------------------------------------------------------------
 add_library(ggml_interface INTERFACE)
 target_include_directories(ggml_interface INTERFACE
         ${WHISPER_LIB_DIR}
@@ -53,14 +73,22 @@ target_include_directories(ggml_interface INTERFACE
         ${WHISPER_LIB_DIR}/ggml/src/ggml-cpu
 )
 
-# whisper ライブラリをビルドする関数
+# ------------------------------------------------------------
+# Function: build_library(<target_name>)
+# ------------------------------------------------------------
+# Builds one shared library (.so) for whisper JNI.
+# Includes:
+#   • CPU-optimized compiler flags
+#   • Optional LTO & dead-code elimination
+#   • Automatic linkage to ggml / android / log libs
+# ------------------------------------------------------------
 function(build_library target_name)
     add_library(${target_name} SHARED ${SOURCE_FILES})
 
-    # CPUバックエンドを使用する定義
+    # Define CPU backend usage for GGML
     target_compile_definitions(${target_name} PUBLIC GGML_USE_CPU)
 
-    # アーキテクチャごとの最適化オプション
+    # Architecture-specific compile options
     set(GGML_COMPILE_OPTIONS "")
     if (${target_name} STREQUAL "whisper_v8fp16_va")
         set(GGML_COMPILE_OPTIONS -march=armv8.2-a+fp16)
@@ -72,7 +100,7 @@ function(build_library target_name)
         target_compile_options(${target_name} PRIVATE ${GGML_COMPILE_OPTIONS})
     endif()
 
-    # Releaseビルド時の最適化設定
+    # Release build optimization flags
     if (NOT ${CMAKE_BUILD_TYPE} STREQUAL "Debug")
         target_compile_options(${target_name} PRIVATE
                 -O3
@@ -88,7 +116,7 @@ function(build_library target_name)
         )
     endif()
 
-    # 外部GGMLを使用する場合はFetchContentで取得
+    # External GGML integration (if GGML_HOME is defined)
     if (GGML_HOME)
         include(FetchContent)
         FetchContent_Declare(ggml SOURCE_DIR ${GGML_HOME})
@@ -97,16 +125,24 @@ function(build_library target_name)
         target_compile_options(ggml PRIVATE ${GGML_COMPILE_OPTIONS})
         target_link_libraries(${target_name} PRIVATE ggml ${LOG_LIB} android ggml_interface)
     else()
+        # Internal GGML build (default)
         target_link_libraries(${target_name} PRIVATE ${LOG_LIB} android ggml_interface)
     endif()
 endfunction()
 
-# AndroidのABIごとに異なるターゲットをビルド
+# ------------------------------------------------------------
+# ABI-specific builds
+# ------------------------------------------------------------
+# Each ABI variant gets its own optimized .so:
+#   • arm64-v8a → whisper_v8fp16_va.so
+#   • armeabi-v7a → whisper_vfpv4.so
+#   • default (fallback) → whisper.so
+# ------------------------------------------------------------
 if (DEFINED ANDROID_ABI AND ${ANDROID_ABI} STREQUAL "arm64-v8a")
     build_library("whisper_v8fp16_va")
 elseif (DEFINED ANDROID_ABI AND ${ANDROID_ABI} STREQUAL "armeabi-v7a")
     build_library("whisper_vfpv4")
 endif()
 
-# 汎用（非最適化）ターゲットもビルド
+# Always build a generic fallback binary
 build_library("whisper")
