@@ -1,0 +1,274 @@
+name: Android CI & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Android module to build (e.g. app)"
+        default: "app"
+      create_release:
+        description: "Publish GitHub Release with built artifacts"
+        type: boolean
+        default: true
+      ndk_version:
+        description: "Android NDK version"
+        default: "28.0.12433566"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      MODULE_PATH: ${{ inputs.module || 'app' }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ORG_GRADLE_PROJECT_releaseStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ORG_GRADLE_PROJECT_releaseKeyAlias: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ORG_GRADLE_PROJECT_releaseKeyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+    steps:
+      # =======================================================
+      # ✅ Checkout source & submodules
+      # =======================================================
+      - name: Checkout source (with submodules)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Initialize & verify submodules
+        run: |
+          echo "🔍 Checking whisper.cpp submodule..."
+          git config --global --add safe.directory '*'
+          git submodule sync --recursive
+          git submodule update --init --recursive || true
+          echo "✅ Submodule list:"
+          git submodule status || true
+
+          # Auto-clone fallback
+          if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
+            echo "::warning::Submodule missing, cloning fresh whisper.cpp..."
+            rm -rf whisper.cpp
+            git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp
+          fi
+
+          # Show current whisper.cpp version
+          echo "🧱 whisper.cpp HEAD:"
+          (cd whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
+
+          echo "🧩 whisper.cpp structure preview (first 3 levels):"
+          find whisper.cpp -maxdepth 3 -type f -name '*.cpp' | head -n 15 || echo "⚠️ whisper.cpp not found"
+
+      # =======================================================
+      # 🔧 Android environment setup
+      # =======================================================
+      - name: Validate Gradle wrapper
+        uses: gradle/wrapper-validation-action@v2
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android SDK & NDK
+        uses: android-actions/setup-android@v3
+        with:
+          ndk-version: ${{ inputs.ndk_version }}
+
+      - name: Install Android build tools
+        run: |
+          yes | sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools" || true
+          echo "✅ Android SDK/NDK installation complete."
+
+      # =======================================================
+      # 🧰 Gradle configuration
+      # =======================================================
+      - name: Configure Gradle cache
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Write gradle.properties
+        run: |
+          if [[ -z "${{ secrets.GH_TOKEN }}" ]]; then
+            echo "::error::GH_TOKEN missing. Please set it in repository secrets."
+            exit 1
+          fi
+          mkdir -p "$HOME/.gradle"
+          cat <<'PROPS' > "$HOME/.gradle/gradle.properties"
+          gh.owner=ishizuki-tech
+          gh.repo=WhispersCpp-Android
+          gh.branch=main
+          gh.pathPrefix=exports
+          gh.token=${{ secrets.GH_TOKEN }}
+          HF_TOKEN=${{ secrets.HF_TOKEN }}
+          org.gradle.daemon=false
+          org.gradle.parallel=true
+          org.gradle.jvmargs=-Xmx4g
+          PROPS
+          echo "✅ gradle.properties configured."
+
+      # =======================================================
+      # 🔐 Keystore setup
+      # =======================================================
+      - name: Decode signing keystore
+        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
+          echo "ANDROID_KEYSTORE_FILE=$PWD/keystore.jks" >> $GITHUB_ENV
+          echo "✅ Keystore decoded."
+
+      # =======================================================
+      # 🏗️ Verify CMake whisper.cpp sources
+      # =======================================================
+      - name: Verify whisper.cpp source files
+        run: |
+          echo "🔍 Verifying whisper.cpp structure..."
+          REQUIRED_FILES=(src/whisper.cpp ggml/src/ggml.c ggml/src/ggml-backend.cpp)
+          for f in "${REQUIRED_FILES[@]}"; do
+            if [[ ! -f "whisper.cpp/$f" ]]; then
+              echo "::error::$f missing under whisper.cpp — possible incomplete clone."
+              exit 1
+            fi
+          done
+          echo "✅ whisper.cpp sources verified."
+
+          # Detect if new GGML files exist (for debug)
+          echo "🧩 GGML CPU files present:"
+          find whisper.cpp/ggml/src/ggml-cpu -maxdepth 1 -type f | sort || true
+
+      # =======================================================
+      # 🧠 Build (CMake + Gradle)
+      # =======================================================
+      - name: Build release artifacts
+        run: |
+          echo "🚀 Building Android module: $MODULE_PATH"
+          ./gradlew \
+            :${{ env.MODULE_PATH }}:clean \
+            :${{ env.MODULE_PATH }}:assembleRelease \
+            :${{ env.MODULE_PATH }}:bundleRelease \
+            --no-daemon --stacktrace --info
+          echo "✅ Build completed successfully."
+
+      # =======================================================
+      # 📦 Collect build outputs
+      # =======================================================
+      - name: Collect build outputs
+        id: collect
+        run: |
+          ROOT="${MODULE_PATH}/build/outputs"
+          echo "📦 Scanning build outputs..."
+          APKs=$(find "$ROOT" -type f -name '*.apk' -print | sort || true)
+          AABs=$(find "$ROOT" -type f -name '*.aab' -print | sort || true)
+          MAPs=$(find "$ROOT" -type f -name 'mapping.txt' -print | sort || true)
+          echo "Found APKs:"; echo "$APKs"
+          echo "Found AABs:"; echo "$AABs"
+          echo "Found MAPs:"; echo "$MAPs"
+          {
+            echo "apk_list<<EOF"
+            echo "$APKs"
+            echo "EOF"
+            echo "aab_list<<EOF"
+            echo "$AABs"
+            echo "EOF"
+            echo "map_list<<EOF"
+            echo "$MAPs"
+            echo "EOF"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      # =======================================================
+      # ☁️ Upload artifacts
+      # =======================================================
+      - name: Upload APKs
+        if: ${{ steps.collect.outputs.apk_list != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: ${{ steps.collect.outputs.apk_list }}
+          retention-days: 14
+
+      - name: Upload AABs
+        if: ${{ steps.collect.outputs.aab_list != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-aab
+          path: ${{ steps.collect.outputs.aab_list }}
+          retention-days: 14
+
+      - name: Upload mapping files
+        if: ${{ steps.collect.outputs.map_list != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: proguard-mapping
+          path: ${{ steps.collect.outputs.map_list }}
+          retention-days: 14
+
+      # =======================================================
+      # 🧩 Derive version & release tag
+      # =======================================================
+      - name: Derive version
+        id: version
+        run: |
+          FILE_GRADLE="${MODULE_PATH}/build.gradle.kts"
+          VERSION=$(grep -E 'versionName' "$FILE_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
+          [[ -z "$VERSION" ]] && VERSION="0.0.0"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ Derived version: $VERSION"
+
+      - name: Compute release tag
+        id: tag
+        run: |
+          TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "🏷️ Generated tag: $TAG"
+
+      # =======================================================
+      # 📝 Publish GitHub Release
+      # =======================================================
+      - name: Prepare release notes
+        id: notes
+        run: |
+          NOTES=$(git log -10 --pretty='* %s (%an)')
+          {
+            echo "body<<EOF"
+            echo "## What's Changed"
+            echo "$NOTES"
+            echo "EOF"
+          } | tee -a "$GITHUB_OUTPUT"
+          echo "🧾 Release notes prepared."
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: ${{ steps.notes.outputs.body }}
+          files: |
+            ${{ steps.collect.outputs.apk_list }}
+            ${{ steps.collect.outputs.aab_list }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+      - name: Skip release
+        if: ${{ !inputs.create_release }}
+        run: echo "Release creation skipped by user input."
