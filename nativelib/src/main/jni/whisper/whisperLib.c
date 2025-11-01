@@ -39,7 +39,7 @@ static inline JNIEnv* get_env_from_jvm(JavaVM* jvm, int* attached_by_us) {
     if (!jvm) return NULL;
     JNIEnv* env = NULL;
     if ((*jvm)->GetEnv(jvm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {
-        if ((*jvm)->AttachCurrentThread(jvm, (void**)&env, NULL) != 0) {
+        if ((*jvm)->AttachCurrentThread(jvm, (JNIEnv **) (void **) &env, NULL) != 0) {
             LOGE("AttachCurrentThread() failed — cannot obtain JNIEnv");
             return NULL;
         }
