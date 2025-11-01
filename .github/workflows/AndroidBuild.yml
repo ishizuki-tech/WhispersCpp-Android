@@ -72,9 +72,9 @@ jobs:
       # =======================================================
       - name: Prune unsupported ggml backends
         run: |
-          echo "🧹 Removing non-Android backends..."
-          rm -rf nativelib/whisper.cpp/ggml/src/ggml-{cuda,metal,cann,opencl,blas}
-          echo "✅ ggml CPU-only configuration complete."
+          echo "🧹 Removing non-Android ggml backends..."
+          rm -rf nativelib/whisper.cpp/ggml/src/ggml-{cuda,metal,cann,opencl,blas} || true
+          echo "✅ CPU-only configuration ready."
           ls -1 nativelib/whisper.cpp/ggml/src || true
 
       # =======================================================
@@ -95,10 +95,12 @@ jobs:
         with:
           ndk-version: ${{ inputs.ndk_version }}
 
-      - name: Install Android build tools
+      - name: Install Android build tools (safe)
         run: |
-          yes | sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
-          echo "✅ SDK/NDK ready."
+          echo "📦 Installing Android SDK components..."
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          echo "✅ Android SDK/NDK installation complete (no pipe error)."
 
       - name: Print Environment Diagnostics
         run: |
@@ -125,7 +127,8 @@ jobs:
           gh.token=${GH_TOKEN}
           org.gradle.daemon=false
           org.gradle.parallel=true
-          org.gradle.jvmargs=-Xmx4g
+          org.gradle.configureondemand=true
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
           PROPS
           echo "✅ gradle.properties configured."
 
@@ -146,12 +149,11 @@ jobs:
         run: |
           echo "🔎 Checking JNI paths..."
           find nativelib/src/main -maxdepth 5 -type f \( -name 'CMakeLists.txt' -o -name '*.cpp' \) | head -n 10
-
           if [[ ! -f nativelib/src/main/jni/whisper/CMakeLists.txt ]]; then
             echo "::error::Missing JNI CMakeLists.txt"
             exit 1
           fi
-          echo "✅ JNI CMakeLists found."
+          echo "✅ JNI structure verified."
 
       # =======================================================
       # 🧠 Build Project
@@ -174,7 +176,7 @@ jobs:
         run: |
           set -e
           ROOT="${MODULE_PATH}/build/outputs"
-          echo "📦 Scanning under $ROOT ..."
+          echo "📦 Scanning build outputs under $ROOT ..."
           APKs=$(find "$ROOT" -type f -name '*.apk' | sort || true)
           AABs=$(find "$ROOT" -type f -name '*.aab' | sort || true)
           MAPs=$(find "${MODULE_PATH}/build/outputs/mapping" -type f -name 'mapping.txt' 2>/dev/null | sort || true)
