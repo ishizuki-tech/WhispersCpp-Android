@@ -53,26 +53,25 @@ jobs:
 
       - name: Initialize & verify submodules
         run: |
-          echo "🔍 Checking whisper.cpp submodule..."
+          echo "🔍 Checking submodule: nativelib/whisper.cpp"
           git config --global --add safe.directory '*'
           git submodule sync --recursive
           git submodule update --init --recursive || true
           echo "✅ Submodule list:"
           git submodule status || true
 
-          # Auto-clone fallback
-          if [[ ! -f whisper.cpp/src/whisper.cpp ]]; then
-            echo "::warning::Submodule missing, cloning fresh whisper.cpp..."
-            rm -rf whisper.cpp
-            git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git whisper.cpp
+          # Fallback: clone whisper.cpp if missing
+          if [[ ! -f nativelib/whisper.cpp/src/whisper.cpp ]]; then
+            echo "::warning::Submodule missing, cloning whisper.cpp manually..."
+            rm -rf nativelib/whisper.cpp
+            git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git nativelib/whisper.cpp
           fi
 
-          # Show current whisper.cpp version
-          echo "🧱 whisper.cpp HEAD:"
-          (cd whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
+          echo "🧱 whisper.cpp HEAD revision:"
+          (cd nativelib/whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
 
-          echo "🧩 whisper.cpp structure preview (first 3 levels):"
-          find whisper.cpp -maxdepth 3 -type f -name '*.cpp' | head -n 15 || echo "⚠️ whisper.cpp not found"
+          echo "🧩 whisper.cpp source tree preview:"
+          find nativelib/whisper.cpp -maxdepth 3 -type f -name '*.cpp' | head -n 15 || echo "⚠️ whisper.cpp not found"
 
       # =======================================================
       # 🔧 Android environment setup
@@ -136,23 +135,22 @@ jobs:
           echo "✅ Keystore decoded."
 
       # =======================================================
-      # 🏗️ Verify CMake whisper.cpp sources
+      # 🏗️ Verify whisper.cpp sources
       # =======================================================
       - name: Verify whisper.cpp source files
         run: |
           echo "🔍 Verifying whisper.cpp structure..."
           REQUIRED_FILES=(src/whisper.cpp ggml/src/ggml.c ggml/src/ggml-backend.cpp)
           for f in "${REQUIRED_FILES[@]}"; do
-            if [[ ! -f "whisper.cpp/$f" ]]; then
-              echo "::error::$f missing under whisper.cpp — possible incomplete clone."
+            if [[ ! -f "nativelib/whisper.cpp/$f" ]]; then
+              echo "::error::$f missing under nativelib/whisper.cpp — possible incomplete clone."
               exit 1
             fi
           done
           echo "✅ whisper.cpp sources verified."
 
-          # Detect if new GGML files exist (for debug)
           echo "🧩 GGML CPU files present:"
-          find whisper.cpp/ggml/src/ggml-cpu -maxdepth 1 -type f | sort || true
+          find nativelib/whisper.cpp/ggml/src/ggml-cpu -maxdepth 1 -type f | sort || true
 
       # =======================================================
       # 🧠 Build (CMake + Gradle)
