@@ -60,7 +60,7 @@ message(STATUS "📂 Using whisper.cpp directory: ${WHISPER_LIB_DIR}")
 # ------------------------------------------------------------
 set(PROJECT_SOURCES
         "${WHISPER_LIB_DIR}/src/whisper.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/WhisperLib.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/whisperLib.c"
 )
 
 # ---- GGML sources (CPU-only)
