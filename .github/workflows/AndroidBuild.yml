@@ -60,7 +60,6 @@ jobs:
           echo "✅ Submodule list:"
           git submodule status || true
 
-          # Fallback clone if missing
           if [[ ! -f nativelib/whisper.cpp/src/whisper.cpp ]]; then
             echo "::warning::Submodule missing, cloning whisper.cpp manually..."
             rm -rf nativelib/whisper.cpp
@@ -101,12 +100,9 @@ jobs:
       - name: Configure Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Write gradle.properties (with AndroidX fix)
+      - name: Write gradle.properties (AndroidX + Jetifier)
         run: |
-          if [[ -z "${{ secrets.GH_TOKEN }}" ]]; then
-            echo "::error::GH_TOKEN missing. Please set it in repository secrets."
-            exit 1
-          fi
+          echo "🧩 Writing global gradle.properties..."
           mkdir -p "$HOME/.gradle"
           cat <<'PROPS' > "$HOME/.gradle/gradle.properties"
           # =====================================
@@ -114,17 +110,27 @@ jobs:
           # =====================================
           android.useAndroidX=true
           android.enableJetifier=true
+
           gh.owner=ishizuki-tech
           gh.repo=WhispersCpp-Android
           gh.branch=main
           gh.pathPrefix=exports
           gh.token=${{ secrets.GH_TOKEN }}
           HF_TOKEN=${{ secrets.HF_TOKEN }}
-          org.gradle.daemon=false
+
+          org.gradle.daemon=true
           org.gradle.parallel=true
-          org.gradle.jvmargs=-Xmx4g
+          org.gradle.jvmargs=-Xmx4g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
           PROPS
-          echo "✅ gradle.properties configured (AndroidX enabled)."
+          echo "✅ ~/.gradle/gradle.properties created with Jetifier enabled."
+
+      # =======================================================
+      # 🧩 Debug: Verify Jetifier activation
+      # =======================================================
+      - name: Debug Gradle AndroidX properties
+        run: |
+          echo "🔍 Checking AndroidX flags from Gradle..."
+          ./gradlew properties | grep -E "AndroidX|Jetifier" || true
 
       # =======================================================
       # 🔐 Keystore setup
@@ -139,7 +145,7 @@ jobs:
       # =======================================================
       # 🧩 Verify whisper.cpp & JNI structure
       # =======================================================
-      - name: Verify whisper.cpp and JNI CMake structure
+      - name: Verify whisper.cpp and JNI structure
         run: |
           echo "📂 Working Directory: $(pwd)"
           find nativelib/src/main/jni/whisper -maxdepth 3 -type f | sort || true
