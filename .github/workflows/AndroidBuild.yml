@@ -1,4 +1,4 @@
-name: Android CI & Release
+name: Android CI & Release (Final Stable)
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 60
 
     env:
       MODULE_PATH: ${{ inputs.module || 'app' }}
@@ -54,36 +54,34 @@ jobs:
       - name: Initialize & verify submodules
         run: |
           set -e
-          echo "🔧 Configure git safety & sync submodules"
           git config --global --add safe.directory '*'
           git submodule sync --recursive || true
+          git submodule update --init --recursive || true
 
-          echo "⬇️  Update submodules"
-          if ! git submodule update --init --recursive; then
-            echo "::warning::Submodule init failed; will fallback to manual clone."
-          fi
-
-          echo "📋 Current submodule status (may be empty):"
-          git submodule status || true
-
-          # Fallback clone if whisper.cpp is missing or empty
           if [[ ! -f nativelib/whisper.cpp/src/whisper.cpp ]]; then
-            echo "::warning::Submodule 'nativelib/whisper.cpp' missing; cloning ggml-org/whisper.cpp..."
+            echo "::warning::Submodule whisper.cpp missing, cloning manually..."
             rm -rf nativelib/whisper.cpp
             git clone --depth=1 https://github.com/ggml-org/whisper.cpp.git nativelib/whisper.cpp
           fi
 
-          echo "🧱 whisper.cpp HEAD revision:"
+          echo "🧱 whisper.cpp HEAD:"
           (cd nativelib/whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
 
       # =======================================================
-      # 🔧 Android / Java
+      # 🧩 Patch whisper.cpp for Android CPU-only
+      # =======================================================
+      - name: Prune unsupported ggml backends
+        run: |
+          echo "🧹 Removing non-Android backends..."
+          rm -rf nativelib/whisper.cpp/ggml/src/ggml-{cuda,metal,cann,opencl,blas}
+          echo "✅ ggml CPU-only configuration complete."
+          ls -1 nativelib/whisper.cpp/ggml/src || true
+
+      # =======================================================
+      # 🔧 Android / Java Environment
       # =======================================================
       - name: Validate Gradle wrapper
         uses: gradle/wrapper-validation-action@v2
-
-      - name: Ensure gradlew is executable
-        run: chmod +x ./gradlew
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -99,20 +97,17 @@ jobs:
 
       - name: Install Android build tools
         run: |
-          set -e
-          yes | sdkmanager --install \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "platform-tools" || true
-          echo "✅ Android SDK/NDK installation complete."
+          yes | sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          echo "✅ SDK/NDK ready."
 
-      - name: Export NDK env
+      - name: Print Environment Diagnostics
         run: |
-          echo "ANDROID_NDK_HOME=${ANDROID_NDK_HOME}" >> $GITHUB_ENV
-          echo "PATH=${ANDROID_NDK_HOME}:${PATH}" >> $GITHUB_ENV
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "PATH=$PATH"
 
       # =======================================================
-      # 🧰 Gradle configuration
+      # 🧰 Gradle Setup
       # =======================================================
       - name: Configure Gradle cache
         uses: gradle/actions/setup-gradle@v3
@@ -121,40 +116,21 @@ jobs:
 
       - name: Write gradle.properties
         run: |
-          set -e
-          if [[ -z "${{ secrets.GH_TOKEN }}" ]]; then
-            echo "::error::GH_TOKEN missing. Set it in repository secrets."
-            exit 1
-          fi
-
           mkdir -p "$HOME/.gradle"
           cat > "$HOME/.gradle/gradle.properties" <<'PROPS'
-          # =====================================
-          # ✅ Global Gradle Configuration
-          # =====================================
           android.useAndroidX=true
           android.enableJetifier=true
-
-          # GitHub upload defaults (used by any custom tasks)
           gh.owner=ishizuki-tech
           gh.repo=WhispersCpp-Android
-          gh.branch=main
-          gh.pathPrefix=exports
           gh.token=${GH_TOKEN}
-
-          # Optional for model downloads, etc.
-          HF_TOKEN=${HF_TOKEN}
-
-          # Gradle runtime
           org.gradle.daemon=false
           org.gradle.parallel=true
-          org.gradle.configureondemand=true
-          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          org.gradle.jvmargs=-Xmx4g
           PROPS
           echo "✅ gradle.properties configured."
 
       # =======================================================
-      # 🔐 Keystore (optional)
+      # 🔐 Keystore
       # =======================================================
       - name: Decode signing keystore
         if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
@@ -164,31 +140,21 @@ jobs:
           echo "✅ Keystore decoded."
 
       # =======================================================
-      # 🧩 Verify native / CMake structure (fail early)
+      # 🧩 Verify JNI structure
       # =======================================================
-      - name: Verify whisper.cpp and JNI CMake structure
+      - name: Verify whisper.cpp JNI
         run: |
-          set -e
-          echo "📂 Working Directory: $(pwd)"
-          echo "🔎 Listing JNI directory (if present):"
-          find nativelib/src/main -maxdepth 5 -type f \( -name 'CMakeLists.txt' -o -name '*.cpp' -o -name '*.c' -o -name '*.h' \) | sort || true
+          echo "🔎 Checking JNI paths..."
+          find nativelib/src/main -maxdepth 5 -type f \( -name 'CMakeLists.txt' -o -name '*.cpp' \) | head -n 10
 
-          # Accept either location:
-          if [[ -f nativelib/src/main/jni/whisper/CMakeLists.txt ]]; then
-            echo "✅ Found JNI CMakeLists at nativelib/src/main/jni/whisper/CMakeLists.txt"
-          elif [[ -f nativelib/src/main/cpp/CMakeLists.txt ]]; then
-            echo "✅ Found JNI CMakeLists at nativelib/src/main/cpp/CMakeLists.txt"
-          else
-            echo "::error::No JNI CMakeLists.txt found under nativelib/src/main/{jni/whisper,cpp}"
+          if [[ ! -f nativelib/src/main/jni/whisper/CMakeLists.txt ]]; then
+            echo "::error::Missing JNI CMakeLists.txt"
             exit 1
           fi
-
-          # Sanity check whisper.cpp sources
-          test -d nativelib/whisper.cpp/src || (echo "::error::Missing nativelib/whisper.cpp/src" && exit 1)
-          find nativelib/whisper.cpp/src -maxdepth 1 -type f -name '*.cpp' | head -n 5
+          echo "✅ JNI CMakeLists found."
 
       # =======================================================
-      # 🧠 Build (Gradle)
+      # 🧠 Build Project
       # =======================================================
       - name: Print Gradle projects
         run: ./gradlew projects --no-daemon
@@ -197,41 +163,44 @@ jobs:
         run: |
           set -e
           echo "🚀 Building Android module: $MODULE_PATH"
-          ./gradlew \
-            :${MODULE_PATH}:clean \
-            :${MODULE_PATH}:assembleRelease \
-            :${MODULE_PATH}:bundleRelease \
-            --no-daemon --stacktrace --info
-          echo "✅ Build completed."
+          ./gradlew :${MODULE_PATH}:assembleRelease :${MODULE_PATH}:bundleRelease --stacktrace --info
+          echo "✅ Build finished successfully."
 
       # =======================================================
-      # 📦 Collect build outputs
+      # 📦 Collect build outputs (Safe)
       # =======================================================
       - name: Collect build outputs
         id: collect
         run: |
           set -e
           ROOT="${MODULE_PATH}/build/outputs"
-          echo "📦 Scanning build outputs under $ROOT ..."
-          APKs=$(find "$ROOT" -type f -name '*.apk' -print | sort || true)
-          AABs=$(find "$ROOT" -type f -name '*.aab' -print | sort || true)
-          MAPs=$(find "${MODULE_PATH}/build/outputs/mapping" -type f -name 'mapping.txt' -print | sort || true)
+          echo "📦 Scanning under $ROOT ..."
+          APKs=$(find "$ROOT" -type f -name '*.apk' | sort || true)
+          AABs=$(find "$ROOT" -type f -name '*.aab' | sort || true)
+          MAPs=$(find "${MODULE_PATH}/build/outputs/mapping" -type f -name 'mapping.txt' 2>/dev/null | sort || true)
 
           echo "Found APKs:"; echo "$APKs"
           echo "Found AABs:"; echo "$AABs"
           echo "Found MAPs:"; echo "$MAPs"
 
           {
-            echo "apk_list<<'EOF'"
-            echo "$APKs"
+            echo "apk_list<<EOF"
+            echo "${APKs:-}"
             echo "EOF"
-            echo "aab_list<<'EOF'"
-            echo "$AABs"
+            echo "aab_list<<EOF"
+            echo "${AABs:-}"
             echo "EOF"
-            echo "map_list<<'EOF'"
-            echo "$MAPs"
+            echo "map_list<<EOF"
+            echo "${MAPs:-}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "✅ Outputs exported safely."
+
+      - name: Debug collected outputs
+        run: |
+          echo "APKs: ${{ steps.collect.outputs.apk_list }}"
+          echo "AABs: ${{ steps.collect.outputs.aab_list }}"
+          echo "MAPs: ${{ steps.collect.outputs.map_list }}"
 
       # =======================================================
       # ☁️ Upload artifacts
@@ -252,71 +221,36 @@ jobs:
           path: ${{ steps.collect.outputs.aab_list }}
           retention-days: 14
 
-      - name: Upload mapping files
-        if: ${{ steps.collect.outputs.map_list != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: proguard-mapping
-          path: ${{ steps.collect.outputs.map_list }}
-          retention-days: 14
-
       # =======================================================
-      # 🧩 Derive version & release tag
+      # 🏷️ Version & Release
       # =======================================================
       - name: Derive version
         id: version
         run: |
-          set -e
-          FILE_GRADLE="${MODULE_PATH}/build.gradle.kts"
-          VERSION=""
-          if [[ -f "$FILE_GRADLE" ]]; then
-            # Try versionName = "x.y.z"
-            VERSION=$(grep -E 'versionName\s*=\s*".*"' "$FILE_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || true)
-            # Fallback: versionName "x.y.z"
-            if [[ -z "$VERSION" ]]; then
-              VERSION=$(grep -E 'versionName\s+"[^"]+"' "$FILE_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || true)
-            fi
-          fi
-          if [[ -z "$VERSION" ]]; then
-            echo "::warning::Could not parse versionName. Using 0.0.0"
-            VERSION="0.0.0"
-          fi
+          FILE="${MODULE_PATH}/build.gradle.kts"
+          VERSION=$(grep -E 'versionName' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "✅ Derived version: $VERSION"
+          echo "✅ versionName: $VERSION"
 
       - name: Compute release tag
         id: tag
         run: |
-          set -e
-          TS="$(date '+%Y%m%d-%H%M')"
+          TS=$(date '+%Y%m%d-%H%M')
           TAG="v${{ steps.version.outputs.version }}-${TS}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "🏷️ Generated tag: $TAG"
+          echo "🏷️ Tag: $TAG"
 
-      # =======================================================
-      # 📝 Prepare release notes
-      # =======================================================
       - name: Prepare release notes
         id: notes
         run: |
-          set -e
-          NOTES="$(git log -20 --pretty='* %s (%an)')"
+          NOTES=$(git log -10 --pretty='* %s (%an)')
           {
-            echo "body<<'EOF'"
+            echo "body<<EOF"
             echo "## What's Changed"
-            echo
-            if [[ -n "$NOTES" ]]; then
-              echo "$NOTES"
-            else
-              echo "* Initial release"
-            fi
+            echo "$NOTES"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          echo "🧾 Release notes prepared."
 
-      # =======================================================
-      # 🚢 Publish GitHub Release
-      # =======================================================
       - name: Publish GitHub Release
         if: ${{ inputs.create_release && (steps.collect.outputs.apk_list != '' || steps.collect.outputs.aab_list != '') }}
         uses: softprops/action-gh-release@v2
@@ -327,12 +261,9 @@ jobs:
           files: |
             ${{ steps.collect.outputs.apk_list }}
             ${{ steps.collect.outputs.aab_list }}
-          draft: false
-          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Skip release (no artifacts or disabled)
-        if: ${{ !inputs.create_release || (steps.collect.outputs.apk_list == '' && steps.collect.outputs.aab_list == '') }}
-        run: |
-          echo "Release creation skipped (input=false or no build artifacts)."
+      - name: Skip release
+        if: ${{ !inputs.create_release }}
+        run: echo "Release skipped."
