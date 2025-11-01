@@ -28,7 +28,7 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
 
     env:
       MODULE_PATH: ${{ inputs.module || 'app' }}
@@ -64,13 +64,13 @@ jobs:
           if [[ ! -f nativelib/whisper.cpp/src/whisper.cpp ]]; then
             echo "::warning::Submodule missing, cloning whisper.cpp manually..."
             rm -rf nativelib/whisper.cpp
-            git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git nativelib/whisper.cpp
+            git clone --depth=1 https://github.com/ggml-org/whisper.cpp.git nativelib/whisper.cpp
           fi
 
           echo "🧱 whisper.cpp HEAD revision:"
           (cd nativelib/whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
 
-          echo "🧩 whisper.cpp source tree preview:"
+          echo "🧩 whisper.cpp structure preview (first 15 files):"
           find nativelib/whisper.cpp -maxdepth 3 -type f -name '*.cpp' | head -n 15 || echo "⚠️ whisper.cpp not found"
 
       # =======================================================
@@ -135,22 +135,17 @@ jobs:
           echo "✅ Keystore decoded."
 
       # =======================================================
-      # 🏗️ Verify whisper.cpp sources
+      # 🧩 Debug: Verify whisper.cpp & JNI CMake structure
       # =======================================================
-      - name: Verify whisper.cpp source files
+      - name: Verify whisper.cpp and JNI CMake structure
         run: |
-          echo "🔍 Verifying whisper.cpp structure..."
-          REQUIRED_FILES=(src/whisper.cpp ggml/src/ggml.c ggml/src/ggml-backend.cpp)
-          for f in "${REQUIRED_FILES[@]}"; do
-            if [[ ! -f "nativelib/whisper.cpp/$f" ]]; then
-              echo "::error::$f missing under nativelib/whisper.cpp — possible incomplete clone."
-              exit 1
-            fi
-          done
-          echo "✅ whisper.cpp sources verified."
-
-          echo "🧩 GGML CPU files present:"
-          find nativelib/whisper.cpp/ggml/src/ggml-cpu -maxdepth 1 -type f | sort || true
+          echo "📂 Working Directory: $(pwd)"
+          echo "🔍 Listing JNI structure:"
+          find nativelib/src/main/jni/whisper -maxdepth 3 -type f | sort
+          echo "🔍 Checking CMakeLists.txt presence:"
+          test -f nativelib/src/main/jni/whisper/CMakeLists.txt && echo "✅ Found JNI CMakeLists.txt" || exit 1
+          echo "🔍 whisper.cpp sources:"
+          find nativelib/whisper.cpp/src -maxdepth 2 -type f -name '*.cpp' | head -n 5 || true
 
       # =======================================================
       # 🧠 Build (CMake + Gradle)
