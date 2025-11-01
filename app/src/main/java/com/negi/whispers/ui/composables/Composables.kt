@@ -1,16 +1,46 @@
+/*
+ * ================================================================
+ *  IshizukiTech LLC — Whisper Integration Framework
+ *  ------------------------------------------------
+ *  File: WhisperUIComposables.kt
+ *  Author: Shu Ishizuki (石附 支)
+ *  License: MIT License
+ *  © 2025 IshizukiTech LLC. All rights reserved.
+ * ================================================================
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the “Software”), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in
+ *  all copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ *  THE SOFTWARE.
+ * ================================================================
+ */
+
 /**
  * Whisper UI Composables
  * -----------------------
- * This file defines all composable UI elements used in the Whisper app:
+ * Defines all user interface components used in the Whisper App.
  *
- * Components included:
+ * ## Components
  * - Styled buttons and configuration dialogs
  * - Language/model dropdown selectors
  * - Recording list with animations and swipe-to-delete
  * - Top bar with app info, language, and model display
  *
  * All composables follow Kotlin’s official documentation style (KDoc),
- * ensuring clarity, maintainability, and consistency.
+ * ensuring readability, maintainability, and visual consistency.
  */
 
 package com.negi.whispers.ui.composables
@@ -46,13 +76,13 @@ import java.io.File
 // ============================================================================
 
 /**
- * Displays a rounded, elevated button using the primary color by default.
+ * Displays a rounded, elevated button using Material3 primary color by default.
  *
  * @param text Label text displayed on the button.
  * @param onClick Callback triggered when the button is tapped.
  * @param modifier Optional [Modifier] for layout customization.
  * @param enabled Enables or disables button interactivity.
- * @param color Custom background color (defaults to primary).
+ * @param color Custom background color (defaults to [MaterialTheme.colorScheme.primary]).
  */
 @Composable
 fun StyledButton(
@@ -217,7 +247,7 @@ fun RecordingList(
     onDeleteRequest: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // Scroll to the newest item when a new recording is added
+    // Auto-scroll to newest recording
     LaunchedEffect(records.size) {
         try {
             if (records.isNotEmpty()) listState.animateScrollToItem(records.lastIndex)
@@ -247,7 +277,7 @@ fun RecordingList(
             val swipeState = rememberSwipeToDismissBoxState()
             val scope = rememberCoroutineScope()
 
-            // Swipe-to-delete handler
+            // Swipe-to-delete
             LaunchedEffect(swipeState.targetValue) {
                 if (swipeState.targetValue == SwipeToDismissBoxValue.StartToEnd) {
                     onDeleteRequest(index)
@@ -329,12 +359,7 @@ fun RecordingList(
 // Dialogs and Top Bar
 // ============================================================================
 
-/**
- * Confirmation dialog shown when deleting a recording.
- *
- * @param onConfirm Called when the user confirms deletion.
- * @param onCancel Called when the user cancels.
- */
+/** Confirmation dialog shown when deleting a recording. */
 @Composable
 fun ConfirmDeleteDialog(onConfirm: () -> Unit, onCancel: () -> Unit) {
     AlertDialog(
@@ -354,9 +379,6 @@ fun ConfirmDeleteDialog(onConfirm: () -> Unit, onCancel: () -> Unit) {
 
 /**
  * Displays the current language and model as a compact label.
- *
- * @param languageCode ISO language code (e.g., "ja", "en").
- * @param selectedModel Name of the loaded Whisper model.
  */
 @Composable
 private fun LanguageLabel(languageCode: String, selectedModel: String) {
@@ -372,9 +394,7 @@ private fun LanguageLabel(languageCode: String, selectedModel: String) {
 }
 
 /**
- * Displays the top application bar with app title, info, and settings buttons.
- *
- * @param viewModel The [MainScreenViewModel] providing configuration and metadata.
+ * Displays the top application bar with title, info, and settings icons.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -387,11 +407,7 @@ fun TopBar(viewModel: MainScreenViewModel) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.Mic,
-                    contentDescription = "Mic",
-                    tint = Color(0xFF2196F3)
-                )
+                Icon(Icons.Default.Mic, contentDescription = "Mic", tint = Color(0xFF2196F3))
                 Text(
                     text = "Whisper App",
                     fontWeight = FontWeight.Bold,
@@ -421,7 +437,7 @@ fun TopBar(viewModel: MainScreenViewModel) {
                 Column {
                     Text("Whisper App v0.0.1")
                     Spacer(Modifier.height(8.dp))
-                    Text("An offline speech recognition app powered by Whisper.cpp.")
+                    Text("Offline speech recognition powered by Whisper.cpp.")
                     Spacer(Modifier.height(4.dp))
                     Text("Supported languages: English / Japanese / Swahili")
                     Spacer(Modifier.height(8.dp))

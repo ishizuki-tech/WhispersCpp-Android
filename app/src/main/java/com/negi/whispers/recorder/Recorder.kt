@@ -1,4 +1,33 @@
-// file: app/src/main/java/com/negi/whispers/recorder/Recorder.kt
+/*
+ * ================================================================
+ *  IshizukiTech LLC — Whisper Integration Framework
+ *  ------------------------------------------------
+ *  File: Recorder.kt
+ *  Author: Shu Ishizuki (石附 支)
+ *  License: MIT License
+ *  © 2025 IshizukiTech LLC. All rights reserved.
+ * ================================================================
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the “Software”), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in
+ *  all copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ *  THE SOFTWARE.
+ * ================================================================
+ */
+
 package com.negi.whispers.recorder
 
 import android.Manifest
@@ -14,21 +43,36 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * High-reliability single-threaded WAV recorder.
+ * Recorder — High-reliability single-threaded WAV recorder.
  *
- * State machine:
+ * ## Overview
+ * Provides deterministic, coroutine-based control over the Android `AudioRecord`
+ * pipeline. It records raw PCM into a temporary file and safely finalizes a
+ * valid RIFF/WAV file upon stopping.
+ *
+ * ## State Machine
+ * ```
  *   Idle → Starting → Recording → Stopping → Idle
+ * ```
  *
- * Technical highlights:
- *  • Dedicated single thread + coroutine scope ensures sequential audio operations.
- *  • Writes temporary PCM → rewrites valid RIFF/WAVE header upon stop().
- *  • Supports rapid Record→Stop taps without race conditions.
- *  • Uses atomic state and AudioRecord release safety.
+ * ## Technical Highlights
+ * - Dedicated single thread + coroutine scope ensures sequential audio operations.
+ * - Writes temporary PCM and rewrites valid RIFF/WAVE header on stop().
+ * - Handles rapid Record→Stop taps without race conditions.
+ * - Uses atomic state and safe AudioRecord release.
+ * - Fully deterministic even under cancellation or early stop.
  *
- * Typical lifecycle:
- *   startRecording(File)
- *   stopRecording()  // suspending
- *   close()          // on ViewModel/Activity teardown
+ * ## Typical Lifecycle
+ * ```kotlin
+ * val recorder = Recorder(context) { e -> Log.e("Recorder", "Error", e) }
+ * recorder.startRecording(File(...))
+ * recorder.stopRecording()
+ * recorder.close()
+ * ```
+ *
+ * @constructor
+ * @param context Application context used for cache directory
+ * @param onError Callback invoked on any recoverable or fatal exception
  */
 class Recorder(
     private val context: Context,
@@ -56,6 +100,7 @@ class Recorder(
     private enum class State { Idle, Starting, Recording, Stopping }
     private val state = AtomicReference(State.Idle)
 
+    /** Returns true if recording or transitioning between recording states. */
     fun isActive(): Boolean = when (state.get()) {
         State.Starting, State.Recording, State.Stopping -> true
         else -> false
@@ -68,8 +113,8 @@ class Recorder(
      * Starts recording in a deterministic, race-free manner.
      * Idempotent — calling during active/starting state is ignored.
      *
-     * @param output target WAV file (will be overwritten)
-     * @param rates prioritized sample rate candidates
+     * @param output Target WAV file (will be overwritten)
+     * @param rates Prioritized sample rate candidates
      */
     fun startRecording(
         output: File,
@@ -92,7 +137,7 @@ class Recorder(
                     rec.release(); error("AudioRecord init failed")
                 }
 
-                // Abort early if user already stopped before init finished
+                // Abort early if user stopped before init finished
                 if (state.get() != State.Starting) {
                     Log.w(TAG, "startRecording aborted: premature stop, state=${state.get()}")
                     rec.release(); cleanup(); state.set(State.Idle)
@@ -157,11 +202,11 @@ class Recorder(
     /**
      * Stops recording and finalizes the WAV file.
      *
-     * Steps:
-     *  1. Unblock AudioRecord.read() via stop()
-     *  2. Cancel & join writer coroutine
-     *  3. Write valid RIFF/WAV header to target file
-     *  4. Cleanup temp PCM and reset state
+     * ### Steps
+     * 1. Unblock `AudioRecord.read()` via `stop()`
+     * 2. Cancel & join writer coroutine
+     * 3. Write valid RIFF/WAVE header to target file
+     * 4. Cleanup temp PCM and reset state
      */
     suspend fun stopRecording() = withContext(Dispatchers.IO) {
         Log.d(TAG, "stopRecording() invoked (state=${state.get()})")
@@ -175,7 +220,7 @@ class Recorder(
             state.set(State.Stopping)
         }
 
-        // Stop AudioRecord (non-blocking safety)
+        // Stop AudioRecord safely (non-blocking)
         activeRecorder.getAndSet(null)?.let {
             Log.d(TAG, "Calling AudioRecord.stop() ...")
             runCatching { it.stop() }.onFailure { Log.w(TAG, "stop() failed: $it") }
@@ -183,7 +228,6 @@ class Recorder(
         }
 
         try {
-            // Cancel writer job gracefully and await completion
             job?.cancel()
             Log.d(TAG, "Joining writer job ...")
             job?.join()
@@ -200,7 +244,7 @@ class Recorder(
                 return@withContext
             }
 
-            // Write WAV header and merge PCM payload
+            // Merge PCM payload with valid WAV header
             writeWavFromPcm(pcm, wav, c.sampleRate, 1, 16)
             Log.d(TAG, "WAV header written")
 

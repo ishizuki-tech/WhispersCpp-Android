@@ -1,13 +1,43 @@
+/*
+ * ================================================================
+ *  IshizukiTech LLC — Whisper Integration Framework
+ *  ------------------------------------------------
+ *  File: MainScreenEntryPoint.kt
+ *  Author: Shu Ishizuki (石附 支)
+ *  License: MIT License
+ *  © 2025 IshizukiTech LLC. All rights reserved.
+ * ================================================================
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the “Software”), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in
+ *  all copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ *  THE SOFTWARE.
+ * ================================================================
+ */
+
 /**
  * Main Screen Entry Point and Core UI Logic
  * ----------------------------------------
- * This file defines the main composables for the Whisper App UI.
+ * Defines the main composables for the Whisper App user interface.
  *
- * Features:
- * - Handles runtime microphone permission requests
- * - Coordinates recording, playback, and transcription state
- * - Displays a scrollable list of recordings
- * - Implements debounced record button for safe user input
+ * ## Features
+ * - Handles runtime microphone permission requests.
+ * - Coordinates recording, playback, and transcription states.
+ * - Displays a scrollable list of recordings.
+ * - Implements a debounced record button for safe user input.
  */
 
 @file:OptIn(ExperimentalMaterial3Api::class)
@@ -36,7 +66,10 @@ import kotlinx.coroutines.launch
 
 /**
  * Entry point composable for the Whisper app’s main screen.
- * Handles permission checks and passes recording state down to [MainScreen].
+ *
+ * Handles permission verification and passes all recording-related states
+ * down to [MainScreen]. Responsible for invoking runtime permission prompts
+ * and syncing permission status to [MainScreenViewModel].
  *
  * @param viewModel The [MainScreenViewModel] managing audio and transcription logic.
  */
@@ -82,16 +115,18 @@ fun MainScreenEntryPoint(viewModel: MainScreenViewModel) {
 }
 
 /**
- * Displays the main screen layout: TopBar, recording list, and record button.
- * Handles start/stop logic, swipe-to-delete, and delete confirmation.
+ * Displays the main screen layout with TopBar, recording list, and record button.
  *
- * @param viewModel The [MainScreenViewModel] providing recording control.
+ * Controls start/stop recording logic, delete confirmation, and UI state feedback.
+ * Implements debouncing to prevent multiple rapid record triggers.
+ *
+ * @param viewModel The [MainScreenViewModel] providing recording control logic.
  * @param canTranscribe Whether transcription is currently available.
- * @param isRecording Whether the app is actively recording.
- * @param selectedIndex Currently selected recording index.
- * @param onSelect Callback when a recording is selected.
- * @param onRecordTapped Callback when the record button is tapped.
- * @param onCardClick Callback when a recording card is double-tapped or played.
+ * @param isRecording Whether the app is actively recording audio.
+ * @param selectedIndex The index of the currently selected recording in the list.
+ * @param onSelect Callback invoked when a recording is selected.
+ * @param onRecordTapped Callback for starting or stopping a recording.
+ * @param onCardClick Callback for playing a recording (usually via card tap).
  */
 @Composable
 private fun MainScreen(
@@ -108,7 +143,7 @@ private fun MainScreen(
     val listState = rememberLazyListState()
     val uiScope = rememberCoroutineScope()
 
-    // Debounce protection to prevent rapid button taps
+    // Debounce protection to prevent rapid record/stop taps
     var clickLocked by remember { mutableStateOf(false) }
     val lockDurationMs = 400L
 
@@ -138,7 +173,7 @@ private fun MainScreen(
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Recordings list
+            // Recordings list UI section
             RecordingList(
                 viewModel = viewModel,
                 records = viewModel.myRecords,
@@ -156,7 +191,7 @@ private fun MainScreen(
                     .fillMaxWidth()
             )
 
-            // Record / Stop button with debounce handling
+            // Record / Stop button (debounced)
             StyledButton(
                 text = if (isRecording) "Stop" else "Record",
                 onClick = {

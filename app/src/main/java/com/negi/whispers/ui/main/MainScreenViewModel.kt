@@ -1,20 +1,50 @@
+/*
+ * ================================================================
+ *  IshizukiTech LLC — Whisper Integration Framework
+ *  ------------------------------------------------
+ *  File: MainScreenViewModel.kt
+ *  Author: Shu Ishizuki (石附 支)
+ *  License: MIT License
+ *  © 2025 IshizukiTech LLC. All rights reserved.
+ * ================================================================
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a copy
+ *  of this software and associated documentation files (the “Software”), to deal
+ *  in the Software without restriction, including without limitation the rights
+ *  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ *  copies of the Software, and to permit persons to whom the Software is
+ *  furnished to do so, subject to the following conditions:
+ *
+ *  The above copyright notice and this permission notice shall be included in
+ *  all copies or substantial portions of the Software.
+ *
+ *  THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ *  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ *  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ *  THE SOFTWARE.
+ * ================================================================
+ */
+
 /**
  * Main Screen ViewModel
  * ----------------------
  * Central controller for Whisper App's main screen logic.
  * It manages audio recording, transcription, playback, and record persistence.
  *
- * Responsibilities:
+ * ## Responsibilities
  * - Coordinates UI state with background operations.
  * - Loads and manages Whisper model context.
  * - Handles safe recording start/stop via [Recorder].
  * - Executes offline transcription with Whisper.cpp.
  * - Persists recording logs and metadata as JSON.
  *
- * Threading:
- * - All UI state mutations run on Main dispatcher.
+ * ## Threading Model
+ * - UI state mutations run on Main dispatcher.
  * - File I/O and model loading occur on IO dispatcher.
- * - Long-running transcription jobs execute on Default dispatcher.
+ * - Long-running transcription runs on Default dispatcher.
  */
 
 @file:OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
@@ -55,7 +85,9 @@ private const val TAG = "MainScreenViewModel"
 
 /**
  * Provides state and logic for the main Whisper screen.
- * Manages user recording, transcription, and playback lifecycle.
+ *
+ * Manages user recording lifecycle, playback control, Whisper model interaction,
+ * and persistent state management for the UI layer.
  */
 class MainScreenViewModel(private val app: Application) : ViewModel() {
 
@@ -117,6 +149,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     // Permissions
     // ---------------------------------------------------------------------
 
+    /** Returns list of runtime permissions required for recording. */
     fun getRequiredPermissions(): List<String> {
         val list = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
@@ -124,6 +157,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         return list
     }
 
+    /** Updates cached microphone permission status. */
     fun updatePermissionsStatus() {
         hasAllRequiredPermissions = getRequiredPermissions().all {
             ContextCompat.checkSelfPermission(app, it) == PackageManager.PERMISSION_GRANTED
@@ -148,6 +182,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     // Model Loading
     // ---------------------------------------------------------------------
 
+    /** Loads a Whisper model from app assets. */
     private suspend fun loadModel(model: String) {
         if (isModelLoading) return
         isModelLoading = true
@@ -174,7 +209,9 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
 
     /**
      * Starts or stops recording.
-     * When stopped, triggers automatic transcription.
+     *
+     * - When stopped, triggers automatic transcription.
+     * - Handles early-stop debounce to ensure stable state.
      */
     fun toggleRecord(onScrollToIndex: (Int) -> Unit) =
         viewModelScope.launch(Dispatchers.Main.immediate) {
@@ -235,10 +272,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
 
     private var lastReTranscribeMs = 0L
 
-    /**
-     * Re-runs transcription for an existing record.
-     * Prevents rapid re-trigger with debounce guard.
-     */
+    /** Re-runs transcription for an existing record (debounced). */
     fun reTranscribe(index: Int) {
         viewModelScope.launch {
             val now = SystemClock.elapsedRealtime()
@@ -278,13 +312,15 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         }
         job.invokeOnCompletion { e ->
             addResultLog(
-                if (e == null) "✅ Transcription completed" else "⛔ Transcription failed: ${e.message}",
+                if (e == null) "✅ Transcription completed"
+                else "⛔ Transcription failed: ${e.message}",
                 index
             )
         }
         transcribeJobRef.set(job)
     }
 
+    /** Runs Whisper transcription using the current model context. */
     private suspend fun transcribeAudio(file: File, index: Int = -1) {
         val ctx = whisperCtx ?: run {
             addResultLog("⛔ Model not loaded", index)
@@ -321,6 +357,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     // Playback
     // ---------------------------------------------------------------------
 
+    /** Plays a given recording by file path. */
     fun playRecording(path: String, index: Int) = viewModelScope.launch {
         if (isRecording) return@launch
         val f = File(path)
@@ -353,6 +390,7 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     // Record Management
     // ---------------------------------------------------------------------
 
+    /** Removes a recording and deletes the corresponding file. */
     fun removeRecordAt(index: Int) {
         if (index !in myRecords.indices) return
         runCatching { File(myRecords[index].absolutePath).delete() }
@@ -421,6 +459,10 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
         mediaPlayer = null
     }
 
+    // ---------------------------------------------------------------------
+    // Lifecycle
+    // ---------------------------------------------------------------------
+
     override fun onCleared() {
         super.onCleared()
         viewModelScope.launch(Dispatchers.Main.immediate) {
@@ -434,10 +476,18 @@ class MainScreenViewModel(private val app: Application) : ViewModel() {
     }
 
     companion object {
+        /**
+         * Factory for Compose [viewModel] instantiation.
+         *
+         * Provides an instance of [MainScreenViewModel] with the given [Application] context.
+         * Matches parameter naming with [ViewModelProvider.Factory] to avoid compiler warnings.
+         */
         fun factory(app: Application) = object : ViewModelProvider.Factory {
+
             @Suppress("UNCHECKED_CAST")
-            override fun <T : ViewModel> create(c: Class<T>): T =
-                MainScreenViewModel(app) as T
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return MainScreenViewModel(app) as T
+            }
         }
     }
 }
