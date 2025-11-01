@@ -1,4 +1,4 @@
-name: Android CI & Release (Final Stable + Asset Safe)
+name: Android CI & Release (Final Stable + Asset Safe + LFS Verified)
 
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ defaults:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 70
 
     env:
       MODULE_PATH: ${{ inputs.module || 'app' }}
@@ -42,42 +42,35 @@ jobs:
 
     steps:
       # =======================================================
-      # ✅ Checkout & Submodules
+      # ✅ Checkout with LFS & Submodules
       # =======================================================
-      - name: Checkout repository (with submodules)
+      - name: Checkout repository (LFS + submodules)
         uses: actions/checkout@v4
         with:
+          lfs: true
           fetch-depth: 0
           submodules: recursive
           token: ${{ secrets.GH_TOKEN }}
 
-      - name: Init and verify submodules
+      - name: Verify LFS-tracked files
         run: |
-          set -e
-          git config --global --add safe.directory '*'
-          git submodule sync --recursive || true
-          git submodule update --init --recursive || true
-
-          if [[ ! -f nativelib/whisper.cpp/src/whisper.cpp ]]; then
-            echo "::warning::Missing whisper.cpp — cloning manually..."
-            rm -rf nativelib/whisper.cpp
-            git clone --depth=1 https://github.com/ggml-org/whisper.cpp.git nativelib/whisper.cpp
-          fi
-
-          echo "🧱 whisper.cpp HEAD:"
-          (cd nativelib/whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
+          echo "📦 Verifying LFS files..."
+          git lfs ls-files || echo "⚠️ No LFS files detected"
+          echo "📁 Model asset sizes:"
+          ls -lh app/src/main/assets/models || true
+          echo "✅ LFS check complete."
 
       # =======================================================
-      # 🧩 Patch whisper.cpp for Android
+      # 🧩 whisper.cpp Patch
       # =======================================================
       - name: Remove non-Android ggml backends
         run: |
-          echo "🧹 Removing CUDA/Metal/OpenCL backends..."
+          echo "🧹 Removing non-Android backends (CUDA/Metal/etc)..."
           rm -rf nativelib/whisper.cpp/ggml/src/ggml-{cuda,metal,cann,opencl,blas} || true
-          echo "✅ ggml CPU-only configuration complete."
+          echo "✅ CPU-only configuration set."
 
       # =======================================================
-      # 🔧 Environment setup
+      # 🔧 Android SDK & JDK
       # =======================================================
       - name: Validate Gradle wrapper
         uses: gradle/wrapper-validation-action@v2
@@ -96,10 +89,10 @@ jobs:
 
       - name: Install Android platform & build-tools
         run: |
-          echo "📦 Installing build-tools & platforms..."
+          echo "📦 Installing build-tools..."
           sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          echo "✅ SDK setup complete."
+          echo "✅ Android SDK/NDK ready."
 
       - name: Print environment summary
         run: |
@@ -109,19 +102,21 @@ jobs:
           echo "PATH=$PATH"
 
       # =======================================================
-      # 📁 Ensure assets exist (prevent empty folder)
+      # 📁 Asset Validation
       # =======================================================
-      - name: Ensure assets/models folder exists
+      - name: Validate assets/models existence
         run: |
+          echo "📂 Checking app/src/main/assets/models ..."
           mkdir -p app/src/main/assets/models
-          if [ ! -f app/src/main/assets/models/.gitkeep ]; then
-            echo "(ci placeholder)" > app/src/main/assets/models/.gitkeep
+          FILE_COUNT=$(find app/src/main/assets/models -type f | wc -l)
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::No model files detected in assets/models (did you commit via LFS?)"
+            exit 1
           fi
-          if [ ! -f app/src/main/assets/tokenizer.json ]; then
-            echo '{}' > app/src/main/assets/tokenizer.json
-          fi
-          echo "✅ Assets folder prepared. Current contents:"
-          find app/src/main/assets -type f || echo "⚠️ No assets found!"
+          echo "✅ Found $FILE_COUNT model file(s)."
+          ls -lh app/src/main/assets/models
+          echo "🔍 SHA1 checksums:"
+          sha1sum app/src/main/assets/models/* || true
 
       # =======================================================
       # 🧰 Gradle setup
@@ -143,10 +138,10 @@ jobs:
           org.gradle.configureondemand=true
           org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
           PROPS
-          echo "✅ gradle.properties written with caching enabled."
+          echo "✅ Gradle caching enabled."
 
       # =======================================================
-      # 🔐 Keystore (optional)
+      # 🔐 Keystore
       # =======================================================
       - name: Decode Android keystore
         if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
@@ -156,14 +151,14 @@ jobs:
           echo "✅ Keystore decoded."
 
       # =======================================================
-      # 🧩 Verify JNI structure
+      # 🧩 Verify JNI
       # =======================================================
       - name: Verify JNI structure
         run: |
-          echo "🔍 JNI/CMake files check:"
+          echo "🔍 Checking JNI/CMake..."
           find nativelib/src/main -maxdepth 5 -type f \( -name 'CMakeLists.txt' -o -name '*.cpp' \) | head -n 15
           test -f nativelib/src/main/jni/whisper/CMakeLists.txt || { echo "::error::Missing JNI CMakeLists.txt"; exit 1; }
-          echo "✅ JNI structure verified."
+          echo "✅ JNI verified."
 
       # =======================================================
       # 🧠 Build
@@ -174,12 +169,12 @@ jobs:
       - name: Build release artifacts
         run: |
           set -e
-          echo "🚀 Building Android module: $MODULE_PATH"
+          echo "🚀 Building module: $MODULE_PATH"
           ./gradlew :${MODULE_PATH}:clean :${MODULE_PATH}:assembleRelease :${MODULE_PATH}:bundleRelease --stacktrace --info
-          echo "✅ Build successful."
+          echo "✅ Build complete."
 
       # =======================================================
-      # 📦 Collect & Inspect Outputs
+      # 📦 Collect Outputs
       # =======================================================
       - name: Collect build outputs
         id: collect
@@ -187,7 +182,6 @@ jobs:
           ROOT="${MODULE_PATH}/build/outputs"
           APKs=$(find "$ROOT" -type f -name '*.apk' | sort || true)
           AABs=$(find "$ROOT" -type f -name '*.aab' | sort || true)
-          MAPs=$(find "${MODULE_PATH}/build/outputs/mapping" -type f -name 'mapping.txt' 2>/dev/null || true)
           echo "Found APKs:"; echo "$APKs"
           echo "Found AABs:"; echo "$AABs"
           {
@@ -197,17 +191,18 @@ jobs:
             echo "aab_list<<EOF"
             echo "${AABs:-}"
             echo "EOF"
-            echo "map_list<<EOF"
-            echo "${MAPs:-}"
-            echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # =======================================================
+      # 🔍 Inspect APK contents
+      # =======================================================
       - name: Inspect assets inside APK
         run: |
-          echo "🔍 Inspecting APK for assets/models..."
+          echo "🔍 Inspecting built APKs..."
           for f in $(find app/build/outputs -name "*.apk"); do
             echo "---------------------------------------"
-            unzip -l "$f" | grep "assets/models" || echo "⚠️ No models folder found!"
+            ls -lh "$f"
+            unzip -l "$f" | grep "assets/models" || echo "⚠️ No models found in $f!"
             echo "---------------------------------------"
           done
 
