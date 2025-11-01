@@ -60,7 +60,7 @@ jobs:
           echo "✅ Submodule list:"
           git submodule status || true
 
-          # Fallback: clone whisper.cpp if missing
+          # Fallback clone if missing
           if [[ ! -f nativelib/whisper.cpp/src/whisper.cpp ]]; then
             echo "::warning::Submodule missing, cloning whisper.cpp manually..."
             rm -rf nativelib/whisper.cpp
@@ -69,9 +69,6 @@ jobs:
 
           echo "🧱 whisper.cpp HEAD revision:"
           (cd nativelib/whisper.cpp && git rev-parse --short HEAD || echo "no git repo")
-
-          echo "🧩 whisper.cpp structure preview (first 15 files):"
-          find nativelib/whisper.cpp -maxdepth 3 -type f -name '*.cpp' | head -n 15 || echo "⚠️ whisper.cpp not found"
 
       # =======================================================
       # 🔧 Android environment setup
@@ -104,7 +101,7 @@ jobs:
       - name: Configure Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Write gradle.properties
+      - name: Write gradle.properties (with AndroidX fix)
         run: |
           if [[ -z "${{ secrets.GH_TOKEN }}" ]]; then
             echo "::error::GH_TOKEN missing. Please set it in repository secrets."
@@ -112,6 +109,11 @@ jobs:
           fi
           mkdir -p "$HOME/.gradle"
           cat <<'PROPS' > "$HOME/.gradle/gradle.properties"
+          # =====================================
+          # ✅ Global Gradle Configuration
+          # =====================================
+          android.useAndroidX=true
+          android.enableJetifier=true
           gh.owner=ishizuki-tech
           gh.repo=WhispersCpp-Android
           gh.branch=main
@@ -122,7 +124,7 @@ jobs:
           org.gradle.parallel=true
           org.gradle.jvmargs=-Xmx4g
           PROPS
-          echo "✅ gradle.properties configured."
+          echo "✅ gradle.properties configured (AndroidX enabled)."
 
       # =======================================================
       # 🔐 Keystore setup
@@ -135,17 +137,15 @@ jobs:
           echo "✅ Keystore decoded."
 
       # =======================================================
-      # 🧩 Debug: Verify whisper.cpp & JNI CMake structure
+      # 🧩 Verify whisper.cpp & JNI structure
       # =======================================================
       - name: Verify whisper.cpp and JNI CMake structure
         run: |
           echo "📂 Working Directory: $(pwd)"
-          echo "🔍 Listing JNI structure:"
-          find nativelib/src/main/jni/whisper -maxdepth 3 -type f | sort
-          echo "🔍 Checking CMakeLists.txt presence:"
+          find nativelib/src/main/jni/whisper -maxdepth 3 -type f | sort || true
           test -f nativelib/src/main/jni/whisper/CMakeLists.txt && echo "✅ Found JNI CMakeLists.txt" || exit 1
-          echo "🔍 whisper.cpp sources:"
-          find nativelib/whisper.cpp/src -maxdepth 2 -type f -name '*.cpp' | head -n 5 || true
+          echo "🔍 whisper.cpp sources (sample):"
+          find nativelib/whisper.cpp/src -maxdepth 2 -type f -name '*.cpp' | head -n 10 || true
 
       # =======================================================
       # 🧠 Build (CMake + Gradle)
