@@ -259,6 +259,7 @@ jobs:
         with:
           name: release-artifacts
           path: artifacts/
+
       - name: Clone Wiki
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
@@ -273,7 +274,10 @@ jobs:
           REPO="${{ github.repository }}"
           WIKI_URL="https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
 
-          echo "📘 Cloning Wiki..."
+          echo "📘 Cleaning any old wiki folder..."
+          rm -rf wiki || true
+
+          echo "📘 Cloning Wiki repository..."
           git clone "$WIKI_URL" wiki
           cd wiki
 
@@ -299,7 +303,7 @@ jobs:
             "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
             jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' >> Downloads.md
 
-          echo "✅ Commit and push to Wiki..."
+          echo "✅ Committing & pushing Wiki..."
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git add Downloads.md
