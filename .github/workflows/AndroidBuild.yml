@@ -1,10 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.8)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.9)
 # ------------------------------------------------------------
 # • branchを手動選択可能（未指定時は現在のbranch）
 # • 常に app モジュールをビルド
-# • Artifacts → Pages & Wiki 両方へリンク出力（サイズ/ SHA256 付き）
-# • AndroidX をCIからも強制有効化 + push競合安全化
+# • Pages / Wiki 両方へ成果物リンク出力（SHA256 / サイズ付き）
+# • AndroidX 強制 + push競合自動解決 + releaseタグ同期
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -30,7 +30,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -127,9 +127,9 @@ jobs:
           echo "files<<EOF" >> $GITHUB_OUTPUT
           cat outputs/files.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "Collected build outputs:"
+          echo "Collected outputs:"
           cat outputs/files.txt
-          echo "--- SHA256 SUMS ---"
+          echo "--- SHA256 ---"
           sha256sum $(cat outputs/files.txt)
 
       - uses: actions/upload-artifact@v4
@@ -137,7 +137,6 @@ jobs:
           name: release-artifacts
           path: ${{ steps.collect.outputs.files }}
           retention-days: 7
-          if-no-files-found: error
 
       - id: version
         run: |
@@ -181,19 +180,17 @@ jobs:
           name: release-artifacts
           path: artifacts/
 
-      - name: Debug artifact list
-        run: ls -lh artifacts || true
-
       - name: Setup Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Prepare gh-pages branch
+      - name: Sync gh-pages safely
         run: |
           set -e
           if git ls-remote --exit-code origin gh-pages; then
             git clone --branch gh-pages "https://github.com/${{ github.repository }}.git" gh-pages
+            cd gh-pages && git pull --rebase || true
           else
             git clone "https://github.com/${{ github.repository }}.git" gh-pages
             cd gh-pages && git checkout --orphan gh-pages
@@ -201,32 +198,41 @@ jobs:
             git add index.html && git commit -m "init gh-pages" && git push origin gh-pages
           fi
 
-      - name: Generate download HTML
+      - name: Generate fancy downloads page
         run: |
           cd gh-pages
           mkdir -p downloads
-          cat > index.html <<'HTML'
-          <!doctype html><html lang="en"><head><meta charset="utf-8"><title>WhispersCpp Downloads</title>
-          <meta http-equiv="refresh" content="0; url=downloads/"></head>
-          <body><p><a href="downloads/">Go to downloads</a></p></body></html>
+          cat > downloads/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>📦 WhispersCpp-Android Downloads</title>
+          <style>body{font-family:sans-serif;text-align:center;padding:50px;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);color:white;}
+          a{color:#00c6ff;text-decoration:none;font-weight:bold;}
+          a:hover{text-decoration:underline;}
+          code{background:rgba(255,255,255,0.1);padding:3px 5px;border-radius:5px;}
+          li{margin:8px 0;list-style:none;}
+          </style></head><body>
+          <h1>📦 WhispersCpp-Android Downloads</h1>
+          <p>Generated: $(date '+%Y-%m-%d %H:%M')</p>
+          <ul>
           HTML
-          HTML="downloads/index.html"
-          echo "<html><head><meta charset='utf-8'><title>Downloads</title></head><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
           for f in $(find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \)); do
             NAME=$(basename "$f")
             cp "$f" downloads/
             SIZE=$(du -h "$f" | cut -f1)
             SHA=$(sha256sum "$f" | cut -d' ' -f1)
-            echo "<li><a href='$NAME'>$NAME</a> — $SIZE <code>$SHA</code></li>" >> "$HTML"
+            echo "<li><a href='$NAME'>$NAME</a> — $SIZE <code>$SHA</code></li>" >> downloads/index.html
           done
-          echo "</ul></body></html>" >> "$HTML"
+          echo "</ul><p><a href='https://github.com/${{ github.repository }}/releases'>View all releases</a></p></body></html>" >> downloads/index.html
 
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: gh-pages
           publish_branch: gh-pages
-          commit_message: "Auto-update downloads ($(date '+%Y-%m-%d %H:%M'))"
+          commit_message: "Update Downloads Page ($(date '+%Y-%m-%d %H:%M'))"
 
   # ============================================================
   # 📘 GitHub Wiki
@@ -245,15 +251,12 @@ jobs:
           name: release-artifacts
           path: artifacts/
 
-      - name: Debug artifact list
-        run: ls -lh artifacts || true
-
       - name: Setup Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Clone Wiki
+      - name: Clone Wiki safely
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
             echo "⚠️ Wiki not found. Please create one manually first."
@@ -266,7 +269,10 @@ jobs:
         run: |
           cd wiki
           FILE="Downloads.md"
+          TAG=$(git -C .. describe --tags --abbrev=0 2>/dev/null || echo "latest")
           echo "# 📦 WhispersCpp-Android Downloads" > "$FILE"
+          echo "" >> "$FILE"
+          echo "**Branch:** ${{ github.ref_name }}  |  **Tag:** $TAG" >> "$FILE"
           echo "" >> "$FILE"
           echo "Updated: $(date '+%Y-%m-%d %H:%M')" >> "$FILE"
           echo "" >> "$FILE"
@@ -287,5 +293,6 @@ jobs:
         run: |
           cd wiki
           git add Downloads.md
-          git commit -m "Update Downloads ($(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
+          git commit -m "Auto-update Wiki Downloads ($(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
+          git pull --rebase || true
           git push origin master || git push origin main || true
