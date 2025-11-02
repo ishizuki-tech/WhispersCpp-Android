@@ -1,5 +1,5 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v5)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6)
 # ------------------------------------------------------------
 # • Code Review → Build → Release → Pages → Wiki
 # • Auto-init gh-pages + Static SDK license + Gradle cache
@@ -178,7 +178,7 @@ jobs:
         run: |
           TS=$(date '+%Y%m%d-%H%M')
           TAG="v${{ steps.version.outputs.version }}-${TS}"
-          NOTES=$(git log -10 --pretty='* %s (%an)')
+          NOTES=$(git -C "${{ github.workspace }}" log -10 --pretty='* %s (%an)')
           {
             echo "tag=$TAG"
             echo "body<<EOF"
@@ -205,6 +205,11 @@ jobs:
     needs: build
     if: ${{ inputs.create_release }}
     steps:
+      - name: Setup Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Checkout or create gh-pages
         run: |
           git config --global init.defaultBranch gh-pages
@@ -219,7 +224,7 @@ jobs:
             echo "<h1>Initializing GitHub Pages</h1>" > index.html
             git add index.html
             git commit -m "init gh-pages"
-            git push origin gh-pages
+            git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
           fi
 
       - name: Generate downloads index (QR + Hash + Notes)
@@ -228,7 +233,7 @@ jobs:
           mkdir -p downloads
           NOTES_FILE="downloads/release_notes.txt"
           echo "## What's Changed" > "$NOTES_FILE"
-          git -C .. log -10 --pretty='* %s (%an)' >> "$NOTES_FILE"
+          git -C "${{ github.workspace }}" log -10 --pretty='* %s (%an)' >> "$NOTES_FILE"
 
           {
             echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -270,7 +275,24 @@ jobs:
     needs: [build, pages]
     if: ${{ inputs.create_release }}
     steps:
-      - name: Setup Git
+      - name: Ensure Wiki repository exists
+        run: |
+          if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
+            echo "⚙️ Initializing empty Wiki..."
+            mkdir temp && cd temp
+            git init
+            echo "# WhispersCpp-Android Wiki" > Home.md
+            git add Home.md
+            git commit -m "Initialize Wiki"
+            git branch -M master
+            git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git"
+            git push origin master
+            cd ..
+          else
+            echo "✅ Wiki repo already exists."
+          fi
+
+      - name: Setup Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -303,11 +325,11 @@ jobs:
           echo "" >> "$FILE"
           echo "## 🧾 Recent Changes" >> "$FILE"
           echo "" >> "$FILE"
-          git -C .. log -10 --pretty='* %s (%an)' >> "$FILE"
+          git -C "${{ github.workspace }}" log -10 --pretty='* %s (%an)' >> "$FILE"
 
       - name: Commit & Push Wiki
         run: |
           cd wiki
           git add Downloads.md
           git commit -m "Auto-update Wiki Downloads.md ($(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
-          git push origin main || git push origin master || true
+          git push origin master || git push origin main || true
