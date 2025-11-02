@@ -1,8 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6.3)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6.4)
 # ------------------------------------------------------------
 # • Code Review → Build → Release → Pages → Wiki
 # • LFS無効化 / Wiki初回スキップ / gh-pages自動生成 安定化済み
+# • Git root再checkout対応 (git -C .. log 対策)
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -100,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          lfs: false  # ✅ Disable LFS to avoid "LFS budget exceeded"
+          lfs: false  # ✅ LFSを無効化
           fetch-depth: 0
           submodules: recursive
 
@@ -132,7 +133,7 @@ jobs:
             nativelib/.cxx
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/CMakeLists.txt') }}
 
-      - name: Write gradle.properties (AndroidX fix)
+      - name: Write gradle.properties
         run: |
           mkdir -p "$HOME/.gradle"
           cat > "$HOME/.gradle/gradle.properties" <<'PROPS'
@@ -265,18 +266,22 @@ jobs:
     needs: [build, pages]
     if: ${{ inputs.create_release }}
     steps:
+      - name: Checkout main repo for git log
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 20  # ✅ log参照用
+
       - name: Setup Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git config --global init.defaultBranch main
 
       - name: Ensure Wiki repository exists
         run: |
           echo "🔍 Checking Wiki repository..."
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
-            echo "⚠️ Wiki not found on GitHub. Skipping wiki update this run."
-            echo "tip: Visit https://github.com/${{ github.repository }}/wiki and click 'Create the first page' once."
+            echo "⚠️ Wiki not found. Skipping wiki update."
+            echo "tip: Visit https://github.com/${{ github.repository }}/wiki and click 'Create the first page'."
             exit 0
           fi
 
@@ -304,7 +309,7 @@ jobs:
           echo "" >> "$FILE"
           echo "## 🧾 Recent Changes" >> "$FILE"
           echo "" >> "$FILE"
-          git -C .. log -10 --pretty='* %s (%an)' >> "$FILE"
+          git -C ../ log -10 --pretty='* %s (%an)' >> "$FILE"
 
       - name: Commit & Push Wiki
         run: |
