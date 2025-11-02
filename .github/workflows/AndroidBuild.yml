@@ -1,13 +1,12 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.3)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.5)
 # ------------------------------------------------------------
 # • 手動 branch 選択（未指定 → 現在ブランチへ自動フォールバック）
 # • app モジュールのみビルド
-# • ggml-model-q4_0.bin は「tryブランチの該当ファイル（raw）」を PRIMARY に使用
-# • Whisper models: 実体DL + 最低サイズ検証 + フェイルオーバ
+# • q4_0: PRIMARY=try/raw → FALLBACK=Release tag(v1.0-2025-1101)
+# • Whisper models: 実体DL + HEADサイズ先読み + 最低サイズ検証
 # • Pages: Fancy Glass UI + 実体ファイル配置 + SHA クリックコピー
-# • Wiki/Release 同期 + AndroidX 強制 + rebase 安全化
-# • Gradle キャッシュ
+# • Wiki/Release 同期 + AndroidX 強制 + Gradle キャッシュ
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -34,6 +33,9 @@ concurrency:
 defaults:
   run:
     shell: bash
+
+env:
+  MODEL_RELEASE_TAG: v1.0-2025-1101  # ← 指定タグ（変更時はここだけ更新）
 
 # ============================================================
 # 🧠 Review
@@ -104,47 +106,40 @@ jobs:
           EOF
 
       # ======================================================
-      # 📦 Whisper models download (robust)
-      #   - ggml-model-q4_0.bin → PRIMARY: Shu's try branch raw URL（ご指定）
-      #   - そのほか: Hugging Face → whisper.cpp/models の順
-      #   - Verify minimum size（LFSポインタ/破損検知）
-      #   - PRIVATE repo の場合は GITHUB_TOKEN ヘッダ自動付与対応
+      # 📦 Whisper models download
+      #   - q4_0: PRIMARY=try/raw → FALLBACK=Releases/tag(MODEL_RELEASE_TAG)
+      #   - HEADでContent-Lengthチェック → 小サイズ/LFS疑いはスキップ
+      #   - 最低サイズ検証（LFSポインタ/破損検知）
+      #   - private対応: GITHUB_TOKEN があれば Authorization 付与
       # ======================================================
-      - name: Download Whisper models (robust; ggml-model-q4_0 from try branch)
+      - name: Download Whisper models (q4_0 from try → tag release)
         env:
-          GH_RAW_TRY_Q4_0: https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin
-          GH_RELEASE_Q4_0: https://github.com/ishizuki-tech/WhispersCpp-Android/releases/latest/download/ggml-model-q4_0.bin
+          Q40_PRIMARY_TRY: https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin
+          Q40_FALLBACK_RELEASE: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
         run: |
           set -euo pipefail
           mkdir -p app/src/main/assets/models
           cd app/src/main/assets/models
           echo "📦 Downloading Whisper ggml models with verification..."
 
-          # 保存名（アプリが期待する名前） → 取得URL
-          declare -A SRC_PRIMARY=(
-            ["ggml-tiny-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-            ["ggml-base-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-            ["ggml-small-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-            # 👇 ご指定の try ブランチの raw を PRIMARY
-            ["ggml-model-q4_0.bin"]="${GH_RAW_TRY_Q4_0}"
-          )
-          declare -A SRC_FALLBACK=(
-            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny.bin"
-            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base.bin"
-            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-small.bin"
-            # 👇 PRIMARY が失敗/小サイズの場合のフォールバック
-            ["ggml-model-q4_0.bin"]="${GH_RELEASE_Q4_0}"
+          # 必要なら tiny/base/small を残す（不要なら削除可）
+          declare -A OTHERS=(
+            ["ggml-tiny-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin|https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny.bin|10485760"
+            ["ggml-base-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin|https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base.bin|62914560"
+            ["ggml-small-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin|https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-small.bin|209715200"
           )
 
-          # 最低サイズ閾値（安全側のざっくり基準）
-          declare -A MIN_BYTES=(
-            ["ggml-tiny-q5_1.bin"]=$((10 * 1024 * 1024))    # >10MB
-            ["ggml-base-q5_1.bin"]=$((60 * 1024 * 1024))    # >60MB
-            ["ggml-small-q5_1.bin"]=$((200 * 1024 * 1024))  # >200MB
-            ["ggml-model-q4_0.bin"]=$((60 * 1024 * 1024))   # >60MB（英語base相当想定）
-          )
+          head_size () {
+            local url="$1"
+            local sz=""
+            if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$url" == https://raw.githubusercontent.com/* || "$url" == https://github.com/* ]]; then
+              sz=$(curl -fsSI -H "Authorization: Bearer ${GITHUB_TOKEN}" "$url" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r' || true)
+            else
+              sz=$(curl -fsSI "$url" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r' || true)
+            fi
+            echo "${sz:-}"
+          }
 
-          # private repo 対応: GITHUB_TOKEN がある場合のみ Authorization ヘッダ付与
           curl_dl () {
             local url="$1" out="$2"
             if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$url" == https://raw.githubusercontent.com/* || "$url" == https://github.com/* ]]; then
@@ -154,57 +149,62 @@ jobs:
             fi
           }
 
-          download_verify () {
-            local name="$1"
-            local url_primary="$2"
-            local url_fallback="$3"
-            local min_bytes="$4"
+          download_chain () {
+            local name="$1" min="$2"
+            shift 2
+            local urls=("$@")
 
-            echo "📥 ${name} ← PRIMARY"
-            if ! curl_dl "$url_primary" "${name}.tmp"; then
-              echo "⚠️ PRIMARY failed, trying FALLBACK..."
-              curl_dl "$url_fallback" "${name}.tmp"
-            fi
-
-            local sz
-            sz=$(wc -c < "${name}.tmp" || echo 0)
-            echo "   size=${sz} bytes (min=${min_bytes})"
-            if [ "$sz" -lt "$min_bytes" ]; then
-              echo "❌ Size below threshold — likely LFS pointer or truncated. Retrying FALLBACK..."
-              rm -f "${name}.tmp"
-              # FALLBACKを再試行（既にFALLBACKから取得している場合はこのまま失敗）
-              if ! curl_dl "$url_fallback" "${name}.tmp"; then
-                echo "❌ FALLBACK download failed."
-                return 1
+            for u in "${urls[@]}"; do
+              [ -z "$u" ] && continue
+              echo "📥 $name ← $u"
+              local szh
+              szh=$(head_size "$u" || true)
+              if [ -n "$szh" ] && [ "$szh" -lt "$min" ]; then
+                echo "   (HEAD size=$szh < min=$min) skip"
+                continue
               fi
-              sz=$(wc -c < "${name}.tmp" || echo 0)
-              echo "   fallback-size=${sz} bytes (min=${min_bytes})"
-              if [ "$sz" -lt "$min_bytes" ]; then
-                echo "❌ FALLBACK also below threshold."
-                rm -f "${name}.tmp"
-                return 1
+              if curl_dl "$u" "${name}.tmp"; then
+                local sz
+                sz=$(wc -c < "${name}.tmp" || echo 0)
+                echo "   got size=$sz (min=$min)"
+                if [ "$sz" -ge "$min" ]; then
+                  mv "${name}.tmp" "$name"
+                  echo "✅ $name OK"
+                  return 0
+                else
+                  echo "   too small → try next"
+                  rm -f "${name}.tmp"
+                fi
+              else
+                echo "   download failed → try next"
+                rm -f "${name}.tmp" || true
               fi
-            fi
-
-            mv "${name}.tmp" "${name}"
-            echo "✅ ${name} OK"
+            done
+            return 1
           }
 
-          set +e
-          ok_all=1
-          for name in "${!SRC_PRIMARY[@]}"; do
-            download_verify "$name" "${SRC_PRIMARY[$name]}" "${SRC_FALLBACK[$name]}" "${MIN_BYTES[$name]}"
-            if [ $? -ne 0 ]; then ok_all=0; fi
+          # --- q4_0: try raw → releases(tag) ---
+          MIN_Q40=62914560  # 60MB未満はLFS/破損扱い
+          if ! download_chain "ggml-model-q4_0.bin" "$MIN_Q40" \
+              "$Q40_PRIMARY_TRY" \
+              "$Q40_FALLBACK_RELEASE"
+          then
+            echo "::error::ggml-model-q4_0.bin could not be fetched from try or the tagged release (${MODEL_RELEASE_TAG})."
+            echo "Hint: try に実体LFSを配置 or Releases(${MODEL_RELEASE_TAG}) に実体アセットを配置してください。"
+            exit 1
+          fi
+
+          # --- 他モデル（必要に応じて調整/削除）---
+          for name in "${!OTHERS[@]}"; do
+            IFS='|' read -r u1 u2 minb <<< "${OTHERS[$name]}"
+            if ! download_chain "$name" "$minb" "$u1" "$u2"; then
+              echo "::error::$name download failed."
+              exit 1
+            fi
           done
-          set -e
 
           echo "--- Downloaded files ---"
           ls -lh
-
-          if [ $ok_all -ne 1 ]; then
-            echo "::error::One or more Whisper model downloads failed verification."
-            exit 1
-          fi
 
       # ======================================================
       # 🏗️ Build Release APK + AAB
@@ -376,7 +376,8 @@ jobs:
             | sort -z \
             | while IFS= read -r -d '' f; do
                 N=$(basename "$f"); S=$(du -h "$f"|cut -f1); H=$(sha256sum "$f"|cut -d' ' -f1)
-                echo "- [$N](https://github.com/${{ github.repository }}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
+                # NOTE: latest ではなく固定タグへリンク
+                echo "- [$N](https://github.com/${{ github.repository }}/releases/download/${{ env.MODEL_RELEASE_TAG }}/$N) — $S  \`$H\`" >> Downloads.md
               done
           git add Downloads.md
           git commit -m "Auto-update Downloads ($(date '+%Y-%m-%d %H:%M'))" || true
