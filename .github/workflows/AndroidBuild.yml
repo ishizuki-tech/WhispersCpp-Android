@@ -1,8 +1,8 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6.1)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6.2)
 # ------------------------------------------------------------
 # • Code Review → Build → Release → Pages → Wiki
-# • gh-pages & Wiki 初回自動生成対応
+# • gh-pages & Wiki 初回自動生成・安定化済み
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -45,12 +45,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-
       - uses: gradle/wrapper-validation-action@v2
 
       - uses: actions/cache@v4
@@ -282,6 +280,12 @@ jobs:
     needs: [build, pages]
     if: ${{ inputs.create_release }}
     steps:
+      - name: Setup Git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global init.defaultBranch main
+
       - name: Ensure Wiki repository exists
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
@@ -291,18 +295,13 @@ jobs:
             echo "# WhispersCpp-Android Wiki" > Home.md
             git add Home.md
             git commit -m "Initialize Wiki"
-            git branch -M master
+            git branch -M main
             git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git"
-            git push origin master
+            git push origin main
             cd ..
           else
             echo "✅ Wiki repo already exists."
           fi
-
-      - name: Setup Git identity
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Clone Wiki
         run: |
@@ -337,4 +336,4 @@ jobs:
           cd wiki
           git add Downloads.md
           git commit -m "Auto-update Wiki Downloads.md ($(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
-          git push origin master || git push origin main || true
+          git push origin main || git push origin master || true
