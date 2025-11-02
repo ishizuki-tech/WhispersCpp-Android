@@ -1,9 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.1)
 # ------------------------------------------------------------
-# • 手動 branch 選択（未指定: try）
+# • 手動 branch 選択（未指定 → 現在のブランチを自動フォールバック）
 # • app モジュールのみビルド
-# • Pages: Fancy Glass UI + model/ABI info
+# • Pages: Fancy Glass UI + 実体ファイル配置 + SHA クリックコピー
 # • Wiki/Release 同期 + AndroidX 強制 + rebase 安全化
 # ============================================================
 
@@ -13,9 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Target branch to build (default: try)"
+        description: "Target branch to build (default: current branch)"
         required: false
-        default: "try"
+        default: ""
       create_release:
         description: "Publish GitHub Release + Pages + Wiki"
         type: boolean
@@ -43,12 +43,17 @@ jobs:
       BRANCH_NAME: ${{ inputs.branch }}
     steps:
       - uses: actions/checkout@v4
-        with: { ref: ${{ env.BRANCH_NAME }} }
+        with:
+          # branch未指定時は現在のブランチにフォールバック
+          ref: ${{ env.BRANCH_NAME || github.ref_name }}
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      - run: |
-          ./gradlew :app:lintDebug || true
-          ./gradlew :app:testDebugUnitTest || true
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Lint & UnitTest (non-blocking with warnings)
+        run: |
+          ./gradlew :app:lintDebug || echo "::warning::Lint failed (continuing pipeline)"
+          ./gradlew :app:testDebugUnitTest || echo "::warning::Unit tests failed (continuing pipeline)"
 
   # ============================================================
   # 🏗️ Build & Release
@@ -62,15 +67,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.BRANCH_NAME }}
+          ref: ${{ env.BRANCH_NAME || github.ref_name }}
           fetch-depth: 0
           lfs: false
           submodules: recursive
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
+        with:
+          distribution: temurin
+          java-version: 17
+
       - uses: android-actions/setup-android@v3
 
-      - name: Gradle properties
+      - name: Setup Gradle properties
         run: |
           mkdir -p ~/.gradle
           cat <<'EOF' > ~/.gradle/gradle.properties
@@ -82,35 +91,52 @@ jobs:
           org.gradle.caching=true
           EOF
 
-      # --------------------------------------------------------
-      # 📦 Download Whisper models
-      # --------------------------------------------------------
-      - name: Download Whisper models (raw.githubusercontent)
+      # ======================================================
+      # 📦 Whisper models auto-download (no LFS required)
+      #  - main ブランチを参照（安定化）
+      # ======================================================
+      - name: Download Whisper models (no LFS)
         run: |
+          set -euo pipefail
           mkdir -p app/src/main/assets/models
+          echo "📦 Downloading Whisper models (from main)..."
           declare -A MODELS=(
-            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-base-q5_1.bin"
-            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin"
-            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-small-q5_1.bin"
-            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-tiny-q5_1.bin"
+            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-base-q5_1.bin"
+            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-model-q4_0.bin"
+            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-small-q5_1.bin"
+            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-tiny-q5_1.bin"
           )
-          echo "📥 Fetching Whisper models..."
           for n in "${!MODELS[@]}"; do
-            curl -fL -o "app/src/main/assets/models/$n" "${MODELS[$n]}"
+            echo "📥 $n"
+            curl -fsSL -o "app/src/main/assets/models/$n" "${MODELS[$n]}"
           done
+          echo "--- Downloaded files ---"
           ls -lh app/src/main/assets/models
 
+      # ======================================================
+      # 🏗️ Build Release APK + AAB
+      # ======================================================
       - name: Build Release
-        run: ./gradlew :app:clean :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon
+        env:
+          ORG_GRADLE_PROJECT_android_useAndroidX: "true"
+          ORG_GRADLE_PROJECT_android_enableJetifier: "true"
+        run: |
+          set -euo pipefail
+          ./gradlew :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
 
       - id: collect
+        name: Collect artifacts (APK/AAB + SHA256)
         run: |
+          set -euo pipefail
           mkdir -p outputs
-          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) > outputs/files.txt
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           echo "files<<EOF" >> $GITHUB_OUTPUT
           cat outputs/files.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          sha256sum $(cat outputs/files.txt)
+          echo "Collected files:"
+          cat outputs/files.txt
+          echo "--- SHA256 SUMS ---"
+          xargs -a outputs/files.txt -r sha256sum
 
       - uses: actions/upload-artifact@v4
         with:
@@ -119,17 +145,26 @@ jobs:
           retention-days: 7
 
       - id: version
+        name: Extract versionName
         run: |
-          VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1)
+          set -euo pipefail
+          VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
 
       - id: release
+        name: Prepare release notes
         run: |
+          set -euo pipefail
           TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
-          NOTES=$(git log -6 --pretty='* %s (%an)')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "## What's Changed"; echo "$NOTES"; echo "EOF" >> $GITHUB_OUTPUT
+          NOTES=$(git log -10 --pretty='* %s (%an)' || true)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<'EOF'"
+            echo "## What's Changed"
+            echo "${NOTES}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         if: ${{ inputs.create_release == true }}
@@ -138,10 +173,13 @@ jobs:
           name: "WhispersCpp Release ${{ steps.version.outputs.version }}"
           body: ${{ steps.release.outputs.body }}
           files: ${{ steps.collect.outputs.files }}
-        env: { GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================
-  # 🌐 Fancy GitHub Pages
+  # 🌐 GitHub Pages — Fancy Glass UI
+  #   - 成果物ファイルを gh-pages/downloads/ に実体コピー
+  #   - SHA はクリックでクリップボードにコピー
   # ============================================================
   pages:
     runs-on: ubuntu-latest
@@ -149,28 +187,40 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
-        with: { name: release-artifacts, path: artifacts }
+        with:
+          name: release-artifacts
+          path: artifacts/
 
       # 🔹 Fetch model metadata (for listing)
       - name: Fetch model metadata
         run: |
           mkdir -p models
           declare -A MODELS=(
-            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-base-q5_1.bin"
-            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin"
-            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-small-q5_1.bin"
-            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-tiny-q5_1.bin"
+            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-base-q5_1.bin"
+            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-model-q4_0.bin"
+            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-small-q5_1.bin"
+            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-tiny-q5_1.bin"
           )
           for n in "${!MODELS[@]}"; do
-            curl -fLs -o "models/$n" "${MODELS[$n]}" || true
+            curl -fsSL -o "models/$n" "${MODELS[$n]}" || true
           done
           ls -lh models || true
 
-      - name: Generate fancy downloads HTML
+      - name: Generate fancy downloads HTML (and copy artifacts)
         run: |
+          set -euo pipefail
           mkdir -p gh-pages/downloads
-          cat > gh-pages/downloads/index.html <<'HTML'
+          # 実体ファイルコピー（HTMLから直接DL可）
+          while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            cp -f "$f" "gh-pages/downloads/$(basename "$f")"
+          done < <(find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) | sort)
+
+          # HTML生成
+          GEN_TIME=$(date '+%Y-%m-%d %H:%M')
+          cat > gh-pages/downloads/index.html <<HTML
           <!doctype html>
           <html lang="en"><head>
           <meta charset="utf-8">
@@ -187,26 +237,34 @@ jobs:
             li{margin:8px 0;}
             a{color:#00eaff;text-decoration:none;font-weight:600;}
             a:hover{text-decoration:underline;}
-            code{background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:6px;}
+            code{background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:6px;cursor:pointer;}
             footer{opacity:.7;margin-top:30px;font-size:.8em;}
           </style>
+          <script>
+            function copySHA(sha){
+              navigator.clipboard.writeText(sha);
+              alert("SHA256 copied:\\n" + sha);
+            }
+          </script>
           </head><body>
           <h1>📦 WhispersCpp-Android Downloads</h1>
-          <p>Generated: $(date '+%Y-%m-%d %H:%M')</p>
+          <p>Generated: ${GEN_TIME}</p>
           <div class="card"><h2>Release Artifacts</h2><ul>
           HTML
 
-          for f in $(find artifacts -type f \( -name "*.apk" -o -name "*.aab" \)); do
-            NAME=$(basename "$f"); SIZE=$(du -h "$f"|cut -f1)
-            SHA=$(sha256sum "$f"|cut -d' ' -f1)
-            echo "<li><a href='$NAME'>$NAME</a> — $SIZE <code>$SHA</code></li>" >> gh-pages/downloads/index.html
+          # リスト項目
+          for f in $(find gh-pages/downloads -maxdepth 1 -type f \( -name "*.apk" -o -name "*.aab" \) -printf "%f\n" | sort); do
+            SIZE=$(du -h "gh-pages/downloads/$f" | cut -f1)
+            SHA=$(sha256sum "gh-pages/downloads/$f" | cut -d' ' -f1)
+            echo "<li><a href='$f'>$f</a> — $SIZE <code onclick=\"copySHA('$SHA')\">$SHA</code></li>" >> gh-pages/downloads/index.html
           done
 
+          # モデル情報
           echo "</ul></div><div class='card'><h2>Embedded Models (ABI info)</h2><ul>" >> gh-pages/downloads/index.html
-          for m in $(find models -type f -name "*.bin" 2>/dev/null); do
+          for m in $(find models -type f -name "*.bin" 2>/dev/null | sort); do
             MNAME=$(basename "$m"); MSIZE=$(du -h "$m"|cut -f1)
-            ABI=$(echo "$MNAME"|grep -Eo 'q[0-9_]+')
-            echo "<li>$MNAME — $MSIZE <code>$ABI</code></li>" >> gh-pages/downloads/index.html
+            ABI=$(echo "$MNAME" | grep -Eo 'q[0-9_]+')
+            echo "<li>$MNAME — $MSIZE <code>${ABI:-n/a}</code></li>" >> gh-pages/downloads/index.html
           done
           echo "</ul></div><footer>Generated automatically • $(date '+%Y-%m-%d')</footer></body></html>" >> gh-pages/downloads/index.html
 
@@ -226,25 +284,31 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with: { name: release-artifacts, path: artifacts }
 
-      - name: Clone Wiki
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts
+
+      - name: Clone Wiki (skip if not exists)
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
-            echo "⚠️ Wiki not found"; exit 0; fi
+            echo "⚠️ Wiki not found; skipping."; exit 0; fi
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
 
       - name: Update Downloads.md
         run: |
+          set -euo pipefail
           cd wiki
           echo "# 📦 WhispersCpp-Android Downloads" > Downloads.md
           echo "Updated: $(date '+%Y-%m-%d %H:%M')" >> Downloads.md
           echo "" >> Downloads.md
-          for f in $(find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \)); do
-            N=$(basename "$f"); S=$(du -h "$f"|cut -f1); H=$(sha256sum "$f"|cut -d' ' -f1)
-            echo "- [$N](https://github.com/${{ github.repository }}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
-          done
+          find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -print0 \
+            | sort -z \
+            | while IFS= read -r -d '' f; do
+                N=$(basename "$f"); S=$(du -h "$f"|cut -f1); H=$(sha256sum "$f"|cut -d' ' -f1)
+                echo "- [$N](https://github.com/${{ github.repository }}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
+              done
           git add Downloads.md
           git commit -m "Auto-update Downloads ($(date '+%Y-%m-%d %H:%M'))" || true
           git pull --rebase || true
