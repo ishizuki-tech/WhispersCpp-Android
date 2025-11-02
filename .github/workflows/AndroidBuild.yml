@@ -1,9 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.0)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.3)
 # ------------------------------------------------------------
-# • 手動ブランチ選択対応
-# • downloads/index.html バグ修正（リンク相対パスとサイズ表示安定化）
-# • LFS無効化 / Wiki初回スキップ / gh-pages自動生成 安定動作
+# • branchを手動選択可能（未指定時は現在のbranch）
+# • 常に app モジュールをビルド
+# • downloads/index.html 修正版 + SHA256表示
+# • LFS無効化 / Wiki自動更新 / gh-pages安定動作
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -12,13 +13,9 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Target branch to build (e.g. main, dev)"
-        required: true
-        default: "main"
-      module:
-        description: "Android module to build (e.g. app)"
-        required: true
-        default: "app"
+        description: "Target branch to build (default: current branch)"
+        required: false
+        default: ""
       create_release:
         description: "Publish GitHub Release + Pages + Wiki"
         type: boolean
@@ -47,14 +44,19 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      MODULE_PATH: app
+      BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ env.BRANCH_NAME }}
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
       - uses: gradle/wrapper-validation-action@v2
 
       - uses: actions/cache@v4
@@ -66,28 +68,17 @@ jobs:
 
       - name: Run Lint
         id: lint
-        run: ./gradlew lintDebug || true
+        run: ./gradlew :${{ env.MODULE_PATH }}:lintDebug || true
 
       - name: Run Unit Tests
         id: test
-        run: ./gradlew testDebugUnitTest || true
+        run: ./gradlew :${{ env.MODULE_PATH }}:testDebugUnitTest || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lint-report
           path: app/build/reports/lint-results.html
-
-      - if: github.event_name == 'workflow_dispatch'
-        uses: marocchino/sticky-pull-request-comment@v2
-        with:
-          header: "🧩 **Code Review Summary**"
-          message: |
-            ✅ Lint: ${{ steps.lint.outcome }}
-            ✅ Tests: ${{ steps.test.outcome }}
-            🔗 [Logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================
   # 🏗️ Build + Release
@@ -97,7 +88,8 @@ jobs:
     needs: review
     timeout-minutes: 70
     env:
-      MODULE_PATH: ${{ inputs.module || 'app' }}
+      MODULE_PATH: app
+      BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
       ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -106,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ env.BRANCH_NAME }}
           lfs: false
           fetch-depth: 0
           submodules: recursive
@@ -205,16 +197,19 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================
-  # 🌐 GitHub Pages (downloads/)
+  # 🌐 GitHub Pages
   # ============================================================
   pages:
     runs-on: ubuntu-latest
     needs: build
     if: ${{ inputs.create_release == true }}
+    env:
+      MODULE_PATH: app
+      BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ env.BRANCH_NAME }}
           fetch-depth: 0
 
       - name: Setup Git identity
@@ -241,8 +236,8 @@ jobs:
           cd gh-pages
           mkdir -p downloads
           HTML="downloads/index.html"
-          echo "<html><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
-          for f in $(find ../${{ inputs.module }}/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \)); do
+          echo "<html><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Branch: ${{ env.BRANCH_NAME }}</p><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
+          for f in $(find ../${{ env.MODULE_PATH }}/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \)); do
             NAME=$(basename "$f")
             cp "$f" "downloads/$NAME"
             SIZE=$(du -h "$f" | cut -f1)
@@ -266,10 +261,13 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build, pages]
     if: ${{ inputs.create_release == true }}
+    env:
+      MODULE_PATH: app
+      BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ env.BRANCH_NAME }}
           fetch-depth: 20
 
       - name: Setup Git identity
@@ -293,11 +291,12 @@ jobs:
           FILE="Downloads.md"
           echo "# 📦 WhispersCpp-Android Downloads" > "$FILE"
           echo "" >> "$FILE"
+          echo "Branch: ${{ env.BRANCH_NAME }}" >> "$FILE"
           echo "Updated: $(date '+%Y-%m-%d %H:%M')" >> "$FILE"
           echo "" >> "$FILE"
           echo "## 🔗 Latest Artifacts" >> "$FILE"
           echo "" >> "$FILE"
-          for f in $(find ../${{ inputs.module }}/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \) 2>/dev/null); do
+          for f in $(find ../${{ env.MODULE_PATH }}/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \) 2>/dev/null); do
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | cut -f1)
             SHA=$(sha256sum "$f" | cut -d' ' -f1)
