@@ -1,11 +1,11 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.6)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7)
 # ------------------------------------------------------------
-# • q4_0: PRIMARY=try/raw → FALLBACK=Release tag (v1.0-2025-1101)
-# • GETサイズで厳密判定（HEADは参考）+ UA/リトライ + 詳細ログ
-# • 任意のSHA256検証 (env.MODEL_Q40_SHA256 を設定時)
+# • q4_0: PRIMARY = HF(jboat) → FALLBACK = Release tag (v1.0-2025-1101)  ※try/raw 不使用
+# • tiny/base/small: HF → upstream（release/try は参照しない）
+# • GETサイズで厳密判定（HEADは参考）+ UA/リトライ + 任意SHA256検証
 # • Pages: Fancy Glass UI + SHAクリックコピー
-# • Wiki/Release 同期 + Gradleキャッシュ + AndroidX強制
+# • Wiki/Release 同期 + Gradleキャッシュ + AndroidX強制（二重化）
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -36,10 +36,16 @@ defaults:
 env:
   MODEL_RELEASE_TAG: v1.0-2025-1101
   CURL_UA: "curl/8.x (GitHub Actions; +https://github.com/actions)"
-  # 任意: q4_0 の期待SHAを設定すると整合性チェックを行う（未設定ならスキップ）
+  # 任意: 期待SHAを設定すると整合性チェックを実施（未設定ならスキップ）
   # MODEL_Q40_SHA256: ""
+  # MODEL_TINY_SHA256: ""
+  # MODEL_BASE_SHA256: ""
+  # MODEL_SMALL_SHA256: ""
 
 jobs:
+  # ============================================================
+  # 🧠 Review
+  # ============================================================
   review:
     runs-on: ubuntu-latest
     env:
@@ -49,13 +55,33 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.BRANCH_NAME || github.ref_name }}
+
+      # AndroidX をプロジェクト直下で強制（全ジョブで確実に読む）
+      - name: Enforce AndroidX (project gradle.properties)
+        run: |
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.configureondemand=true
+          org.gradle.caching=true
+          EOF
+          echo "== gradle.properties ==" && cat gradle.properties
+
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
+        with:
+          distribution: temurin
+          java-version: 17
+
       - name: Lint & UnitTest (non-blocking with warnings)
         run: |
-          ./gradlew :app:lintDebug || echo "::warning::Lint failed (continuing pipeline)"
-          ./gradlew :app:testDebugUnitTest || echo "::warning::Unit tests failed (continuing pipeline)"
+          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:lintDebug || echo "::warning::Lint failed (continuing pipeline)"
+          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:testDebugUnitTest || echo "::warning::Unit tests failed (continuing pipeline)"
 
+  # ============================================================
+  # 🏗️ Build & Release
+  # ============================================================
   build:
     runs-on: ubuntu-latest
     needs: review
@@ -69,6 +95,18 @@ jobs:
           fetch-depth: 0
           lfs: false
           submodules: recursive
+
+      # AndroidX を再度プロジェクト直下に明示（冪等）
+      - name: Enforce AndroidX (project gradle.properties)
+        run: |
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.configureondemand=true
+          org.gradle.caching=true
+          EOF
 
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
@@ -84,7 +122,7 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties','**/libs.versions.toml') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      - name: Setup Gradle properties
+      - name: Setup Gradle user properties
         run: |
           mkdir -p ~/.gradle
           cat <<'EOF' > ~/.gradle/gradle.properties
@@ -97,50 +135,56 @@ jobs:
           EOF
 
       # ======================================================
-      # 📦 Whisper models (q4_0: try/raw → tagged release)
-      #   - HEADは参考、最終判定はGET実サイズ
-      #   - UA/リトライ/詳細ログ
-      #   - 最低サイズ(60MB) & 任意SHA検証
+      # 📦 Whisper models
+      #   - q4_0: HF(jboat) → Release(tag)
+      #   - tiny/base/small: HF → upstream
+      #   - HEADは参考、最終判定はGET実サイズ + 任意SHA検証
       # ======================================================
-      - name: Download Whisper models (robust)
+      - name: Download Whisper models (robust; no try/raw)
         env:
-          Q40_PRIMARY_TRY: https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin
-          Q40_FALLBACK_RELEASE: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
+          # 保存名
+          M_Q40:  ggml-model-q4_0.bin
+          M_TINY: ggml-tiny-q5_1.bin
+          M_BASE: ggml-base-q5_1.bin
+          M_SMALL: ggml-small-q5_1.bin
+
+          # q4_0: PRIMARY=HF(jboat) / FALLBACK=Release(tag)
+          U_HF_Q40:  https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
+          U_REL_Q40: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
+
+          # tiny/base/small: HF → upstream
+          U_HF_TINY:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          U_HF_BASE:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          U_HF_SMALL:  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          U_UP_TINY:   https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny-q5_1.bin
+          U_UP_BASE:   https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base-q5_1.bin
+          U_UP_SMALL:  https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-small-q5_1.bin
+
+          # 最小サイズしきい値（破損/LFSポインタ検知）
+          MIN_Q40:   ${{ 60 * 1024 * 1024 }}    # 60MB
+          MIN_TINY:  ${{ 25 * 1024 * 1024 }}    # 25MB
+          MIN_BASE:  ${{ 90 * 1024 * 1024 }}    # 90MB
+          MIN_SMALL: ${{ 220 * 1024 * 1024 }}   # 220MB
         run: |
           set -euo pipefail
           mkdir -p app/src/main/assets/models
           cd app/src/main/assets/models
 
-          echo "📦 Downloading Whisper ggml models (HEAD advisory; GET decisive)"
+          echo "📦 Whisper ggml models — HEADは参考、最終判定はGETサイズ／任意SHA"
           echo "  MODEL_RELEASE_TAG=${MODEL_RELEASE_TAG}"
 
-          MIN_Q40=$((60 * 1024 * 1024)) # 60MB
-          echo "  MIN_Q40=${MIN_Q40}"
-
-          # ----- helpers
           head_size () {
             local url="$1"
-            local auth=()
-            if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$url" == https://raw.githubusercontent.com/* || "$url" == https://github.com/* ]]; then
-              auth=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )
-            fi
-            curl -fsSIL -A "${CURL_UA}" -L "${auth[@]}" "$url" \
+            curl -fsSIL -A "${CURL_UA}" -L "$url" \
               | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r' || true
           }
-
           curl_dl () {
             local url="$1" out="$2"
-            local auth=()
-            if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$url" == https://raw.githubusercontent.com/* || "$url" == https://github.com/* ]]; then
-              auth=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )
-            fi
-            # --retry 5: ネットワーク瞬断等に強く
-            curl -fSL -A "${CURL_UA}" --retry 5 --retry-delay 2 "${auth[@]}" -o "$out" "$url"
+            curl -fSL -A "${CURL_UA}" --retry 5 --retry-delay 2 -o "$out" "$url"
           }
-
           sha_check () {
-            local file="$1" expect="$2"
-            [ -z "${expect}" ] && return 0
+            local file="$1" expect="${2:-}"
+            [ -z "$expect" ] && return 0
             local got; got=$(sha256sum "$file" | awk '{print $1}')
             if [ "$got" != "$expect" ]; then
               echo "::error::SHA256 mismatch for ${file}. got=${got}, expect=${expect}"
@@ -148,16 +192,15 @@ jobs:
             fi
             echo "✅ SHA256 OK for ${file}"
           }
-
           download_chain () {
             local name="$1" min="$2"; shift 2
             local urls=("$@")
             for u in "${urls[@]}"; do
               [ -z "$u" ] && continue
               echo "📥 $name ← $u"
-              local szh=""; szh=$(head_size "$u" || true)
+              local szh; szh=$(head_size "$u" || true)
               if [ -n "$szh" ]; then
-                echo "   HEAD Content-Length=$szh (min=$min)  ※参考値"
+                echo "   HEAD Content-Length=$szh (min=$min)  ※参考"
               else
                 echo "   HEAD Content-Length=NA (chunked/redirect); GETで判定"
               fi
@@ -169,7 +212,7 @@ jobs:
                   echo "✅ $name OK (from $u)"
                   return 0
                 else
-                  echo "   too small (likely LFS pointer or wrong asset) → next"
+                  echo "   too small → next"
                   rm -f "${name}.tmp"
                 fi
               else
@@ -180,32 +223,33 @@ jobs:
             return 1
           }
 
-          # q4_0 取得（try/raw → tagged release）
-          if ! download_chain "ggml-model-q4_0.bin" "$MIN_Q40" \
-               "${Q40_PRIMARY_TRY}" \
-               "${Q40_FALLBACK_RELEASE}"; then
-            echo "::error::ggml-model-q4_0.bin could not be fetched (try/raw and ${MODEL_RELEASE_TAG})."
-            echo "Check: Releases/${MODEL_RELEASE_TAG} に ggml-model-q4_0.bin が存在し、アクセス可能か"
+          # q4_0: HF(jboat) → Release(tag)
+          if ! download_chain "${M_Q40}" "${MIN_Q40}" "${U_HF_Q40}" "${U_REL_Q40}"; then
+            echo "::error::${M_Q40} could not be fetched (HF jboat / Release ${MODEL_RELEASE_TAG})."
             exit 1
           fi
+          [ -n "${MODEL_Q40_SHA256:-}" ] && sha_check "${M_Q40}" "${MODEL_Q40_SHA256}"
 
-          # 任意: 期待SHA検証
-          if [ -n "${MODEL_Q40_SHA256:-}" ]; then
-            sha_check "ggml-model-q4_0.bin" "${MODEL_Q40_SHA256}"
-          fi
+          # tiny/base/small: HF → upstream
+          if ! download_chain "${M_TINY}"  "${MIN_TINY}"  "${U_HF_TINY}"  "${U_UP_TINY}"; then
+            echo "::error::${M_TINY} download failed."; exit 1; fi
+          [ -n "${MODEL_TINY_SHA256:-}" ] && sha_check "${M_TINY}" "${MODEL_TINY_SHA256}"
 
-          # 追加モデルが必要ならここに同様のdownload_chainを追記
+          if ! download_chain "${M_BASE}"  "${MIN_BASE}"  "${U_HF_BASE}"  "${U_UP_BASE}"; then
+            echo "::error::${M_BASE} download failed."; exit 1; fi
+          [ -n "${MODEL_BASE_SHA256:-}" ] && sha_check "${M_BASE}" "${MODEL_BASE_SHA256}"
+
+          if ! download_chain "${M_SMALL}" "${MIN_SMALL}" "${U_HF_SMALL}" "${U_UP_SMALL}"; then
+            echo "::error::${M_SMALL} download failed."; exit 1; fi
+          [ -n "${MODEL_SMALL_SHA256:-}" ] && sha_check "${M_SMALL}" "${MODEL_SMALL_SHA256}"
 
           echo "--- Downloaded files ---"
           ls -lh
 
       - name: Build Release
-        env:
-          ORG_GRADLE_PROJECT_android_useAndroidX: "true"
-          ORG_GRADLE_PROJECT_android_enableJetifier: "true"
         run: |
           set -euo pipefail
-          ./gradlew :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
+          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
 
       - id: collect
         name: Collect artifacts (APK/AAB + SHA256)
@@ -225,6 +269,7 @@ jobs:
         with:
           name: release-artifacts
           path: ${{ steps.collect.outputs.files }}
+          # keep 7 days
           retention-days: 7
 
       - id: version
@@ -259,6 +304,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ============================================================
+  # 🌐 GitHub Pages — Fancy Glass UI
+  # ============================================================
   pages:
     runs-on: ubuntu-latest
     needs: build
@@ -315,6 +363,9 @@ jobs:
           publish_branch: gh-pages
           commit_message: "Update fancy downloads page ($(date '+%Y-%m-%d %H:%M'))"
 
+  # ============================================================
+  # 📘 Wiki Sync
+  # ============================================================
   wiki:
     runs-on: ubuntu-latest
     needs: pages
@@ -339,7 +390,6 @@ jobs:
             | sort -z \
             | while IFS= read -r -d '' f; do
                 N=$(basename "$f"); S=$(du -h "$f"|cut -f1); H=$(sha256sum "$f"|cut -d' ' -f1)
-                # APK/AABは最新releaseへの直リン。「モデル」はワークフローで取得済みなのでここはビルド成果物のみ
                 echo "- [$N](https://github.com/${{ github.repository }}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
               done
           git add Downloads.md
