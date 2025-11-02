@@ -1,12 +1,11 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7b)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7d)
 # ------------------------------------------------------------
 # • トリガー最小化: workflow_dispatch のみ（push/PRなし）
-# • Sanity → Review → Build/Release → Pages → Wiki
 # • q4_0: PRIMARY = HF(jboat) → FALLBACK = Release(v1.0-2025-1101)  ※try/raw 不使用
-# • tiny/base/small: HF → upstream
+# • tiny/base/small: HF → upstream（プロジェクト内モデルには一切依存しない）
 # • GETサイズで厳密判定（HEADは参考）+ UA/リトライ + 任意SHA256検証
-# • AndroidX強制（二重化）+ Gradle Cache + Fancy Pages
+# • AndroidX強制（二重化）+ Gradle Cache + Fancy Pages + Wiki 同期
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -37,7 +36,11 @@ defaults:
 env:
   MODEL_RELEASE_TAG: v1.0-2025-1101
   CURL_UA: "curl/8.x (GitHub Actions; +https://github.com/actions)"
-  # MODEL_Q40_SHA256: ""   # 任意: 期待SHAを設定で整合性チェック
+  # 任意: 期待SHAを設定すると整合性チェックを実施（未設定ならスキップ）
+  # MODEL_Q40_SHA256: ""
+  # MODEL_TINY_SHA256: ""
+  # MODEL_BASE_SHA256: ""
+  # MODEL_SMALL_SHA256: ""
 
 # ============================================================
 # 🧠 Review
@@ -53,6 +56,7 @@ jobs:
         with:
           ref: ${{ env.BRANCH_NAME || github.ref_name }}
 
+      # AndroidX をプロジェクト直下で強制（後続ジョブでも冪等）
       - name: Enforce AndroidX (project gradle.properties)
         run: |
           cat > gradle.properties <<'EOF'
@@ -69,6 +73,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+
       - name: Lint & UnitTest (non-blocking with warnings)
         run: |
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:lintDebug || echo "::warning::Lint failed (continuing)"
@@ -119,7 +124,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Setup Gradle properties
+      - name: Setup Gradle user properties
         run: |
           mkdir -p ~/.gradle
           cat <<'EOF' > ~/.gradle/gradle.properties
@@ -134,25 +139,23 @@ jobs:
       # ----------------------- Models ------------------------
       - name: Download Whisper models (robust; no try/raw)
         env:
+          # 保存名
           M_Q40:  ggml-model-q4_0.bin
           M_TINY: ggml-tiny-q5_1.bin
           M_BASE: ggml-base-q5_1.bin
           M_SMALL: ggml-small-q5_1.bin
 
+          # q4_0: HF(jboat) → Release(tag)
           U_HF_Q40:  https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
           U_REL_Q40: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
 
+          # tiny/base/small: HF → upstream
           U_HF_TINY:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
           U_HF_BASE:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
           U_HF_SMALL:  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           U_UP_TINY:   https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny-q5_1.bin
           U_UP_BASE:   https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base-q5_1.bin
           U_UP_SMALL:  https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-small-q5_1.bin
-
-          MIN_Q40:   ${{ 60 * 1024 * 1024 }}
-          MIN_TINY:  ${{ 25 * 1024 * 1024 }}
-          MIN_BASE:  ${{ 90 * 1024 * 1024 }}
-          MIN_SMALL: ${{ 220 * 1024 * 1024 }}
         run: |
           set -euo pipefail
           mkdir -p app/src/main/assets/models
@@ -160,6 +163,12 @@ jobs:
 
           echo "📦 Whisper ggml models — HEADは参考、最終判定はGETサイズ／任意SHA"
           echo "  MODEL_RELEASE_TAG=${MODEL_RELEASE_TAG}"
+
+          # ★ env では算術不可なので Bash 内で算術代入
+          MIN_Q40=$((60 * 1024 * 1024))    # 60MB
+          MIN_TINY=$((25 * 1024 * 1024))   # 25MB
+          MIN_BASE=$((90 * 1024 * 1024))   # 90MB
+          MIN_SMALL=$((220 * 1024 * 1024)) # 220MB
 
           head_size () { curl -fsSIL -A "${CURL_UA}" -L "$1" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r' || true; }
           curl_dl () { curl -fSL -A "${CURL_UA}" --retry 5 --retry-delay 2 -o "$2" "$1"; }
@@ -179,16 +188,19 @@ jobs:
           }
 
           # q4_0: HF(jboat) → Release(tag)
-          download_chain "${M_Q40}" "${MIN_Q40}" "${U_HF_Q40}" "${U_REL_Q40}" || { echo "::error::${M_Q40} fetch failed"; exit 1; }
-          [ -n "${MODEL_Q40_SHA256:-}" ] && sha_check "${M_Q40}" "${MODEL_Q40_SHA256}"
+          download_chain "${M_Q40}"  "${MIN_Q40}"  "${U_HF_Q40}"  "${U_REL_Q40}"  || { echo "::error::${M_Q40} fetch failed";  exit 1; }
+          [ -n "${MODEL_Q40_SHA256:-}"  ] && sha_check "${M_Q40}"  "${MODEL_Q40_SHA256}"
 
           # tiny/base/small: HF → upstream
-          download_chain "${M_TINY}"  "${MIN_TINY}"  "${U_HF_TINY}"  "${U_UP_TINY}"  || { echo "::error::${M_TINY} failed";  exit 1; }
+          download_chain "${M_TINY}" "${MIN_TINY}" "${U_HF_TINY}" "${U_UP_TINY}" || { echo "::error::${M_TINY} failed";  exit 1; }
           [ -n "${MODEL_TINY_SHA256:-}" ] && sha_check "${M_TINY}" "${MODEL_TINY_SHA256}"
-          download_chain "${M_BASE}"  "${MIN_BASE}"  "${U_HF_BASE}"  "${U_UP_BASE}"  || { echo "::error::${M_BASE} failed";  exit 1; }
+
+          download_chain "${M_BASE}" "${MIN_BASE}" "${U_HF_BASE}" "${U_UP_BASE}" || { echo "::error::${M_BASE} failed";  exit 1; }
           [ -n "${MODEL_BASE_SHA256:-}" ] && sha_check "${M_BASE}" "${MODEL_BASE_SHA256}"
+
           download_chain "${M_SMALL}" "${MIN_SMALL}" "${U_HF_SMALL}" "${U_UP_SMALL}" || { echo "::error::${M_SMALL} failed"; exit 1; }
           [ -n "${MODEL_SMALL_SHA256:-}" ] && sha_check "${M_SMALL}" "${MODEL_SMALL_SHA256}"
+
           echo "--- Downloaded files ---"; ls -lh
 
       - name: Build Release
@@ -208,10 +220,8 @@ jobs:
           echo "files<<EOF" >> $GITHUB_OUTPUT
           cat outputs/files.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "Collected files:"
-          cat outputs/files.txt
-          echo "--- SHA256 SUMS ---"
-          xargs -a outputs/files.txt -r sha256sum
+          echo "Collected files:"; cat outputs/files.txt
+          echo "--- SHA256 SUMS ---"; xargs -a outputs/files.txt -r sha256sum
 
       - uses: actions/upload-artifact@v4
         with:
@@ -231,7 +241,6 @@ jobs:
         name: Prepare release notes
         run: |
           set -euo pipefail
-          TAG="v${{ steps.version.outputs.tag && '' || '' }}"; true
           TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
           NOTES=$(git log -10 --pretty='* %s (%an)' || true)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -261,11 +270,10 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-          path: artifacts/
+        path: artifacts/
 
       - name: Generate fancy downloads HTML (and copy artifacts)
         run: |
@@ -321,18 +329,15 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-          path: artifacts
-
+        path: artifacts
       - name: Clone Wiki (skip if not exists)
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
             echo "⚠️ Wiki not found; skipping."; exit 0; fi
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
-
       - name: Update Downloads.md
         run: |
           set -euo pipefail
