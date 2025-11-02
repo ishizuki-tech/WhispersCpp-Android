@@ -1,11 +1,11 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7d)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7e)
 # ------------------------------------------------------------
-# • トリガー最小化: workflow_dispatch のみ（push/PRなし）
-# • q4_0: PRIMARY = HF(jboat) → FALLBACK = Release(v1.0-2025-1101)  ※try/raw 不使用
-# • tiny/base/small: HF → upstream（プロジェクト内モデルには一切依存しない）
-# • GETサイズで厳密判定（HEADは参考）+ UA/リトライ + 任意SHA256検証
-# • AndroidX強制（二重化）+ Gradle Cache + Fancy Pages + Wiki 同期
+# • workflow_dispatch のみ
+# • q4_0: HF(jboat) → Release(v1.0-2025-1101)
+# • tiny/base/small: HF → upstream
+# • GET実サイズ判定 + 任意SHA検証
+# • AndroidX強制（二重化）/ Gradle Cache / Fancy Pages / Wiki
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -36,15 +36,11 @@ defaults:
 env:
   MODEL_RELEASE_TAG: v1.0-2025-1101
   CURL_UA: "curl/8.x (GitHub Actions; +https://github.com/actions)"
-  # 任意: 期待SHAを設定すると整合性チェックを実施（未設定ならスキップ）
   # MODEL_Q40_SHA256: ""
   # MODEL_TINY_SHA256: ""
   # MODEL_BASE_SHA256: ""
   # MODEL_SMALL_SHA256: ""
 
-# ============================================================
-# 🧠 Review
-# ============================================================
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -56,7 +52,6 @@ jobs:
         with:
           ref: ${{ env.BRANCH_NAME || github.ref_name }}
 
-      # AndroidX をプロジェクト直下で強制（後続ジョブでも冪等）
       - name: Enforce AndroidX (project gradle.properties)
         run: |
           cat > gradle.properties <<'EOF'
@@ -79,9 +74,6 @@ jobs:
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:lintDebug || echo "::warning::Lint failed (continuing)"
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:testDebugUnitTest || echo "::warning::Unit tests failed (continuing)"
 
-  # ============================================================
-  # 🏗️ Build & Release
-  # ============================================================
   build:
     runs-on: ubuntu-latest
     needs: review
@@ -136,20 +128,16 @@ jobs:
           org.gradle.caching=true
           EOF
 
-      # ----------------------- Models ------------------------
       - name: Download Whisper models (robust; no try/raw)
         env:
-          # 保存名
           M_Q40:  ggml-model-q4_0.bin
           M_TINY: ggml-tiny-q5_1.bin
           M_BASE: ggml-base-q5_1.bin
           M_SMALL: ggml-small-q5_1.bin
 
-          # q4_0: HF(jboat) → Release(tag)
           U_HF_Q40:  https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
           U_REL_Q40: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
 
-          # tiny/base/small: HF → upstream
           U_HF_TINY:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
           U_HF_BASE:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
           U_HF_SMALL:  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
@@ -164,11 +152,10 @@ jobs:
           echo "📦 Whisper ggml models — HEADは参考、最終判定はGETサイズ／任意SHA"
           echo "  MODEL_RELEASE_TAG=${MODEL_RELEASE_TAG}"
 
-          # ★ env では算術不可なので Bash 内で算術代入
-          MIN_Q40=$((60 * 1024 * 1024))    # 60MB
-          MIN_TINY=$((25 * 1024 * 1024))   # 25MB
-          MIN_BASE=$((90 * 1024 * 1024))   # 90MB
-          MIN_SMALL=$((220 * 1024 * 1024)) # 220MB
+          MIN_Q40=$((60 * 1024 * 1024))
+          MIN_TINY=$((25 * 1024 * 1024))
+          MIN_BASE=$((90 * 1024 * 1024))
+          MIN_SMALL=$((220 * 1024 * 1024))
 
           head_size () { curl -fsSIL -A "${CURL_UA}" -L "$1" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r' || true; }
           curl_dl () { curl -fSL -A "${CURL_UA}" --retry 5 --retry-delay 2 -o "$2" "$1"; }
@@ -187,11 +174,9 @@ jobs:
             done; return 1
           }
 
-          # q4_0: HF(jboat) → Release(tag)
           download_chain "${M_Q40}"  "${MIN_Q40}"  "${U_HF_Q40}"  "${U_REL_Q40}"  || { echo "::error::${M_Q40} fetch failed";  exit 1; }
           [ -n "${MODEL_Q40_SHA256:-}"  ] && sha_check "${M_Q40}"  "${MODEL_Q40_SHA256}"
 
-          # tiny/base/small: HF → upstream
           download_chain "${M_TINY}" "${MIN_TINY}" "${U_HF_TINY}" "${U_UP_TINY}" || { echo "::error::${M_TINY} failed";  exit 1; }
           [ -n "${MODEL_TINY_SHA256:-}" ] && sha_check "${M_TINY}" "${MODEL_TINY_SHA256}"
 
@@ -261,9 +246,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ============================================================
-  # 🌐 GitHub Pages — Fancy Glass UI
-  # ============================================================
   pages:
     runs-on: ubuntu-latest
     needs: build
@@ -273,7 +255,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-        path: artifacts/
+          path: artifacts/
 
       - name: Generate fancy downloads HTML (and copy artifacts)
         run: |
@@ -320,9 +302,6 @@ jobs:
           publish_branch: gh-pages
           commit_message: "Update fancy downloads page ($(date '+%Y-%m-%d %H:%M'))"
 
-  # ============================================================
-  # 📘 Wiki Sync
-  # ============================================================
   wiki:
     runs-on: ubuntu-latest
     needs: pages
@@ -332,7 +311,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-        path: artifacts
+          path: artifacts
       - name: Clone Wiki (skip if not exists)
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
