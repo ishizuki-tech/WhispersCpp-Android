@@ -1,10 +1,13 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.1)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.3)
 # ------------------------------------------------------------
-# • 手動 branch 選択（未指定 → 現在のブランチを自動フォールバック）
+# • 手動 branch 選択（未指定 → 現在ブランチへ自動フォールバック）
 # • app モジュールのみビルド
+# • ggml-model-q4_0.bin は「tryブランチの該当ファイル（raw）」を PRIMARY に使用
+# • Whisper models: 実体DL + 最低サイズ検証 + フェイルオーバ
 # • Pages: Fancy Glass UI + 実体ファイル配置 + SHA クリックコピー
 # • Wiki/Release 同期 + AndroidX 強制 + rebase 安全化
+# • Gradle キャッシュ
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -44,7 +47,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # branch未指定時は現在のブランチにフォールバック
           ref: ${{ env.BRANCH_NAME || github.ref_name }}
       - uses: actions/setup-java@v4
         with:
@@ -79,6 +81,16 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
+      - name: Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties','**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
       - name: Setup Gradle properties
         run: |
           mkdir -p ~/.gradle
@@ -92,26 +104,107 @@ jobs:
           EOF
 
       # ======================================================
-      # 📦 Whisper models auto-download (no LFS required)
-      #  - main ブランチを参照（安定化）
+      # 📦 Whisper models download (robust)
+      #   - ggml-model-q4_0.bin → PRIMARY: Shu's try branch raw URL（ご指定）
+      #   - そのほか: Hugging Face → whisper.cpp/models の順
+      #   - Verify minimum size（LFSポインタ/破損検知）
+      #   - PRIVATE repo の場合は GITHUB_TOKEN ヘッダ自動付与対応
       # ======================================================
-      - name: Download Whisper models (no LFS)
+      - name: Download Whisper models (robust; ggml-model-q4_0 from try branch)
+        env:
+          GH_RAW_TRY_Q4_0: https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin
+          GH_RELEASE_Q4_0: https://github.com/ishizuki-tech/WhispersCpp-Android/releases/latest/download/ggml-model-q4_0.bin
         run: |
           set -euo pipefail
           mkdir -p app/src/main/assets/models
-          echo "📦 Downloading Whisper models (from main)..."
-          declare -A MODELS=(
-            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-base-q5_1.bin"
-            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-model-q4_0.bin"
-            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-small-q5_1.bin"
-            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-tiny-q5_1.bin"
+          cd app/src/main/assets/models
+          echo "📦 Downloading Whisper ggml models with verification..."
+
+          # 保存名（アプリが期待する名前） → 取得URL
+          declare -A SRC_PRIMARY=(
+            ["ggml-tiny-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
+            ["ggml-base-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+            ["ggml-small-q5_1.bin"]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+            # 👇 ご指定の try ブランチの raw を PRIMARY
+            ["ggml-model-q4_0.bin"]="${GH_RAW_TRY_Q4_0}"
           )
-          for n in "${!MODELS[@]}"; do
-            echo "📥 $n"
-            curl -fsSL -o "app/src/main/assets/models/$n" "${MODELS[$n]}"
+          declare -A SRC_FALLBACK=(
+            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny.bin"
+            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base.bin"
+            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-small.bin"
+            # 👇 PRIMARY が失敗/小サイズの場合のフォールバック
+            ["ggml-model-q4_0.bin"]="${GH_RELEASE_Q4_0}"
+          )
+
+          # 最低サイズ閾値（安全側のざっくり基準）
+          declare -A MIN_BYTES=(
+            ["ggml-tiny-q5_1.bin"]=$((10 * 1024 * 1024))    # >10MB
+            ["ggml-base-q5_1.bin"]=$((60 * 1024 * 1024))    # >60MB
+            ["ggml-small-q5_1.bin"]=$((200 * 1024 * 1024))  # >200MB
+            ["ggml-model-q4_0.bin"]=$((60 * 1024 * 1024))   # >60MB（英語base相当想定）
+          )
+
+          # private repo 対応: GITHUB_TOKEN がある場合のみ Authorization ヘッダ付与
+          curl_dl () {
+            local url="$1" out="$2"
+            if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$url" == https://raw.githubusercontent.com/* || "$url" == https://github.com/* ]]; then
+              curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -o "$out" "$url"
+            else
+              curl -fsSL -o "$out" "$url"
+            fi
+          }
+
+          download_verify () {
+            local name="$1"
+            local url_primary="$2"
+            local url_fallback="$3"
+            local min_bytes="$4"
+
+            echo "📥 ${name} ← PRIMARY"
+            if ! curl_dl "$url_primary" "${name}.tmp"; then
+              echo "⚠️ PRIMARY failed, trying FALLBACK..."
+              curl_dl "$url_fallback" "${name}.tmp"
+            fi
+
+            local sz
+            sz=$(wc -c < "${name}.tmp" || echo 0)
+            echo "   size=${sz} bytes (min=${min_bytes})"
+            if [ "$sz" -lt "$min_bytes" ]; then
+              echo "❌ Size below threshold — likely LFS pointer or truncated. Retrying FALLBACK..."
+              rm -f "${name}.tmp"
+              # FALLBACKを再試行（既にFALLBACKから取得している場合はこのまま失敗）
+              if ! curl_dl "$url_fallback" "${name}.tmp"; then
+                echo "❌ FALLBACK download failed."
+                return 1
+              fi
+              sz=$(wc -c < "${name}.tmp" || echo 0)
+              echo "   fallback-size=${sz} bytes (min=${min_bytes})"
+              if [ "$sz" -lt "$min_bytes" ]; then
+                echo "❌ FALLBACK also below threshold."
+                rm -f "${name}.tmp"
+                return 1
+              fi
+            fi
+
+            mv "${name}.tmp" "${name}"
+            echo "✅ ${name} OK"
+          }
+
+          set +e
+          ok_all=1
+          for name in "${!SRC_PRIMARY[@]}"; do
+            download_verify "$name" "${SRC_PRIMARY[$name]}" "${SRC_FALLBACK[$name]}" "${MIN_BYTES[$name]}"
+            if [ $? -ne 0 ]; then ok_all=0; fi
           done
+          set -e
+
           echo "--- Downloaded files ---"
-          ls -lh app/src/main/assets/models
+          ls -lh
+
+          if [ $ok_all -ne 1 ]; then
+            echo "::error::One or more Whisper model downloads failed verification."
+            exit 1
+          fi
 
       # ======================================================
       # 🏗️ Build Release APK + AAB
@@ -178,8 +271,6 @@ jobs:
 
   # ============================================================
   # 🌐 GitHub Pages — Fancy Glass UI
-  #   - 成果物ファイルを gh-pages/downloads/ に実体コピー
-  #   - SHA はクリックでクリップボードにコピー
   # ============================================================
   pages:
     runs-on: ubuntu-latest
@@ -192,21 +283,6 @@ jobs:
         with:
           name: release-artifacts
           path: artifacts/
-
-      # 🔹 Fetch model metadata (for listing)
-      - name: Fetch model metadata
-        run: |
-          mkdir -p models
-          declare -A MODELS=(
-            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-base-q5_1.bin"
-            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-model-q4_0.bin"
-            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-small-q5_1.bin"
-            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/main/app/src/main/assets/models/ggml-tiny-q5_1.bin"
-          )
-          for n in "${!MODELS[@]}"; do
-            curl -fsSL -o "models/$n" "${MODELS[$n]}" || true
-          done
-          ls -lh models || true
 
       - name: Generate fancy downloads HTML (and copy artifacts)
         run: |
@@ -259,13 +335,6 @@ jobs:
             echo "<li><a href='$f'>$f</a> — $SIZE <code onclick=\"copySHA('$SHA')\">$SHA</code></li>" >> gh-pages/downloads/index.html
           done
 
-          # モデル情報
-          echo "</ul></div><div class='card'><h2>Embedded Models (ABI info)</h2><ul>" >> gh-pages/downloads/index.html
-          for m in $(find models -type f -name "*.bin" 2>/dev/null | sort); do
-            MNAME=$(basename "$m"); MSIZE=$(du -h "$m"|cut -f1)
-            ABI=$(echo "$MNAME" | grep -Eo 'q[0-9_]+')
-            echo "<li>$MNAME — $MSIZE <code>${ABI:-n/a}</code></li>" >> gh-pages/downloads/index.html
-          done
           echo "</ul></div><footer>Generated automatically • $(date '+%Y-%m-%d')</footer></body></html>" >> gh-pages/downloads/index.html
 
       - uses: peaceiris/actions-gh-pages@v4
