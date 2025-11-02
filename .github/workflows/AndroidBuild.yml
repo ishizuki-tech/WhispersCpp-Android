@@ -1,10 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.6)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.8)
 # ------------------------------------------------------------
 # • branchを手動選択可能（未指定時は現在のbranch）
 # • 常に app モジュールをビルド
-# • Artifacts → Pages & Wiki 両方へリンク出力
-# • SHA256 + サイズ + Releaseリンク付き
+# • Artifacts → Pages & Wiki 両方へリンク出力（サイズ/ SHA256 付き）
+# • AndroidX をCIからも強制有効化 + push競合安全化
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -30,7 +30,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}
   cancel-in-progress: false
 
 defaults:
@@ -99,25 +99,44 @@ jobs:
         with:
           ndk-version: ${{ inputs.ndk_version }}
 
-      - name: Build Release
+      - name: Setup Gradle properties
         run: |
-          ./gradlew :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace
+          mkdir -p ~/.gradle
+          cat > ~/.gradle/gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.configureondemand=true
+          org.gradle.caching=true
+          EOF
+
+      - name: Build Release
+        env:
+          ORG_GRADLE_PROJECT_android_useAndroidX: "true"
+          ORG_GRADLE_PROJECT_android_enableJetifier: "true"
+        run: |
+          set -euo pipefail
+          ./gradlew :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
 
       - id: collect
         run: |
+          set -euo pipefail
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) > outputs/files.txt
           echo "files<<EOF" >> $GITHUB_OUTPUT
           cat outputs/files.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "Collected files:"
+          echo "Collected build outputs:"
           cat outputs/files.txt
+          echo "--- SHA256 SUMS ---"
+          sha256sum $(cat outputs/files.txt)
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
           path: ${{ steps.collect.outputs.files }}
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: error
 
       - id: version
@@ -160,18 +179,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-          path: artifacts
+          path: artifacts/
 
       - name: Debug artifact list
-        run: ls -lh artifacts
+        run: ls -lh artifacts || true
 
       - name: Setup Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Clone or create gh-pages
+      - name: Prepare gh-pages branch
         run: |
+          set -e
           if git ls-remote --exit-code origin gh-pages; then
             git clone --branch gh-pages "https://github.com/${{ github.repository }}.git" gh-pages
           else
@@ -181,13 +201,18 @@ jobs:
             git add index.html && git commit -m "init gh-pages" && git push origin gh-pages
           fi
 
-      - name: Generate downloads index
+      - name: Generate download HTML
         run: |
           cd gh-pages
           mkdir -p downloads
+          cat > index.html <<'HTML'
+          <!doctype html><html lang="en"><head><meta charset="utf-8"><title>WhispersCpp Downloads</title>
+          <meta http-equiv="refresh" content="0; url=downloads/"></head>
+          <body><p><a href="downloads/">Go to downloads</a></p></body></html>
+          HTML
           HTML="downloads/index.html"
-          echo "<html><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
-          for f in $(find ../artifacts -type f \( -name '*.apk' -o -name '*.aab' \)); do
+          echo "<html><head><meta charset='utf-8'><title>Downloads</title></head><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
+          for f in $(find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \)); do
             NAME=$(basename "$f")
             cp "$f" downloads/
             SIZE=$(du -h "$f" | cut -f1)
@@ -199,7 +224,7 @@ jobs:
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: gh-pages/downloads
+          publish_dir: gh-pages
           publish_branch: gh-pages
           commit_message: "Auto-update downloads ($(date '+%Y-%m-%d %H:%M'))"
 
@@ -218,10 +243,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-          path: artifacts
+          path: artifacts/
 
       - name: Debug artifact list
-        run: ls -lh artifacts
+        run: ls -lh artifacts || true
 
       - name: Setup Git identity
         run: |
@@ -235,6 +260,7 @@ jobs:
             exit 0
           fi
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
+          cd wiki && git pull --rebase || true
 
       - name: Update Downloads.md
         run: |
@@ -246,7 +272,7 @@ jobs:
           echo "" >> "$FILE"
           echo "## 🔗 Latest Artifacts" >> "$FILE"
           echo "" >> "$FILE"
-          for f in $(find ../artifacts -type f \( -name '*.apk' -o -name '*.aab' \)); do
+          for f in $(find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \)); do
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | cut -f1)
             SHA=$(sha256sum "$f" | cut -d' ' -f1)
