@@ -269,7 +269,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          WIKI_URL="https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
+
+          echo "📘 Cloning Wiki..."
+          git clone "$WIKI_URL" wiki
           cd wiki
+
           echo "# 📦 WhispersCpp-Android Downloads" > Downloads.md
           echo "Updated: $(date '+%Y-%m-%d %H:%M')" >> Downloads.md
           echo "" >> Downloads.md
@@ -284,14 +291,18 @@ jobs:
           echo "## ✅ Latest Files" >> Downloads.md
           find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -print0 | sort -z | while IFS= read -r -d '' f; do
             N=$(basename "$f"); S=$(du -h "$f"|cut -f1); H=$(sha256sum "$f"|cut -d' ' -f1)
-            echo "- [$N](https://github.com/${{ github.repository }}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
+            echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
           done
           echo "" >> Downloads.md
           echo "## 🕓 Historical Releases" >> Downloads.md
           curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases?per_page=20" | \
+            "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
             jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' >> Downloads.md
+
+          echo "✅ Commit and push to Wiki..."
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
           git add Downloads.md
-          git commit -m "Auto-update QR + model info + history ($(date '+%Y-%m-%d %H:%M'))" || true
-          git pull --rebase || true
-          git push origin master || git push origin main || true
+          git commit -m "Auto-update Wiki (QR + model info + history $(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
+          git branch -M main
+          git push "$WIKI_URL" main --force
