@@ -1,9 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v2)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v3)
 # ------------------------------------------------------------
 # • Code Review → Build → Release → Pages Deploy
 # • QR codes + SHA256 hashes + Release Notes
-# • Static SDK license + Build cache + No broken pipes
+# • Static SDK license + AndroidX fix + Build cache
 # ============================================================
 
 name: Android CI & Release (Full + QR + Hash + Notes)
@@ -124,8 +124,21 @@ jobs:
       - name: Pre-accept Android SDK licenses
         run: |
           mkdir -p "$ANDROID_SDK_ROOT/licenses"
-          echo -e "\n24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
           echo "✅ Licenses pre-accepted."
+
+      - name: Write gradle.properties (AndroidX fix)
+        run: |
+          mkdir -p "$HOME/.gradle"
+          cat > "$HOME/.gradle/gradle.properties" <<'PROPS'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          org.gradle.configureondemand=true
+          org.gradle.caching=true
+          PROPS
+          echo "✅ gradle.properties written (AndroidX enabled)."
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -140,7 +153,6 @@ jobs:
 
       - name: Install platforms & tools
         run: |
-          echo "📦 Installing build-tools and platforms..."
           sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
           yes | sdkmanager --licenses || true
           echo "✅ Android SDK/NDK setup complete."
@@ -153,7 +165,7 @@ jobs:
             ~/.gradle/wrapper
             app/.cxx
             nativelib/.cxx
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/CMakeLists.txt') }}
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/CMakeLists.txt', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-${{ runner.os }}-
 
       - name: Decode keystore
@@ -237,17 +249,22 @@ jobs:
           echo "## What's Changed" > "$NOTES_FILE"
           git log -10 --pretty='* %s (%an)' >> "$NOTES_FILE"
 
-          {
-            echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            echo '<title>WhispersCpp-Android Downloads</title>'
-            echo '<style>body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f9fafb;margin:0;padding:2rem;color:#333}'
-            echo '.card{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);padding:1.5rem;margin:1.5rem auto;max-width:760px}'
-            echo '.file-entry{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:.8rem 0;border-bottom:1px solid #eee}'
-            echo 'a.download{text-decoration:none;color:#0078d4;font-weight:500}img.qr{width:100px;height:100px}code.hash{font-size:.8rem;background:#f1f3f4;padding:2px 6px;border-radius:4px}'
-            echo '</style></head><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: '$(date '+%Y-%m-%d %H:%M')'</p><div class="card">'
-          } > downloads/index.html
+          cat > downloads/index.html <<'HTML'
+          <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>WhispersCpp-Android Downloads</title>
+          <style>
+          body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f9fafb;margin:0;padding:2rem;color:#333}
+          .card{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);padding:1.5rem;margin:1.5rem auto;max-width:760px}
+          .file-entry{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:.8rem 0;border-bottom:1px solid #eee}
+          a.download{text-decoration:none;color:#0078d4;font-weight:500}img.qr{width:100px;height:100px}code.hash{font-size:.8rem;background:#f1f3f4;padding:2px 6px;border-radius:4px}
+          </style></head><body>
+          <h1>📦 WhispersCpp-Android Downloads</h1>
+          <p>Generated: $(date '+%Y-%m-%d %H:%M')</p>
+          <div class="card">
+          HTML
 
-          for f in $(find ../${{ github.workspace }}/${{ needs.build.outputs.files }} -type f \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null || true); do
+          for f in $(find $GITHUB_WORKSPACE -type f \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null || true); do
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | cut -f1)
             SHA=$(sha256sum "$f" | cut -d' ' -f1)
