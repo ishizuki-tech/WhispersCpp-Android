@@ -1,8 +1,8 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6.2)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v6.3)
 # ------------------------------------------------------------
 # • Code Review → Build → Release → Pages → Wiki
-# • gh-pages & Wiki 初回自動生成・安定化済み
+# • LFS無効化 / Wiki初回スキップ / gh-pages自動生成 安定化済み
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -100,7 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: false  # ✅ Disable LFS to avoid "LFS budget exceeded"
           fetch-depth: 0
           submodules: recursive
 
@@ -205,7 +205,7 @@ jobs:
     needs: build
     if: ${{ inputs.create_release }}
     steps:
-      - name: Checkout main repo (for git log)
+      - name: Checkout main repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 50
@@ -232,37 +232,22 @@ jobs:
             git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
           fi
 
-      - name: Generate downloads index (QR + Hash + Notes)
+      - name: Generate downloads index
         run: |
           cd gh-pages
           mkdir -p downloads
           NOTES_FILE="downloads/release_notes.txt"
           echo "## What's Changed" > "$NOTES_FILE"
           git -C .. log -10 --pretty='* %s (%an)' >> "$NOTES_FILE"
-
-          {
-            echo '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-            echo '<title>WhispersCpp-Android Downloads</title>'
-            echo '<style>body{font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#f9fafb;padding:2rem}'
-            echo '.card{background:#fff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.08);padding:1.5rem;margin:1.5rem auto;max-width:760px}'
-            echo '.file-entry{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:.8rem 0;border-bottom:1px solid #eee}'
-            echo 'a.download{text-decoration:none;color:#0078d4;font-weight:500}img.qr{width:100px;height:100px}code.hash{font-size:.8rem;background:#f1f3f4;padding:2px 6px;border-radius:4px}'
-            echo '</style></head><body><h1>📦 WhispersCpp-Android Downloads</h1>'
-            echo '<p>Generated: '$(date '+%Y-%m-%d %H:%M')'</p><div class="card">'
-          } > downloads/index.html
-
+          echo "<html><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > downloads/index.html
           for f in $(find ../app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \)); do
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | cut -f1)
-            SHA=$(sha256sum "$f" | cut -d' ' -f1)
-            URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/downloads/$NAME"
-            QR="https://api.qrserver.com/v1/create-qr-code/?size=100x100&data=$URL"
-            echo "<div class='file-entry'><div><a class='download' href='$NAME'>$NAME</a><div style='color:#999;'>($SIZE)</div><div><code class='hash'>$SHA</code></div></div><img class='qr' src='$QR'></div>" >> downloads/index.html
+            echo "<li><a href='$NAME'>$NAME</a> — $SIZE</li>" >> downloads/index.html
           done
-
-          echo "</div><div class='card'><h2>Release Notes</h2><pre>" >> downloads/index.html
+          echo "</ul><pre>" >> downloads/index.html
           cat "$NOTES_FILE" >> downloads/index.html
-          echo "</pre></div><footer>WhispersCpp CI © $(date '+%Y')</footer></body></html>" >> downloads/index.html
+          echo "</pre></body></html>" >> downloads/index.html
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
@@ -288,19 +273,11 @@ jobs:
 
       - name: Ensure Wiki repository exists
         run: |
+          echo "🔍 Checking Wiki repository..."
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
-            echo "⚙️ Initializing empty Wiki..."
-            mkdir temp && cd temp
-            git init
-            echo "# WhispersCpp-Android Wiki" > Home.md
-            git add Home.md
-            git commit -m "Initialize Wiki"
-            git branch -M main
-            git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git"
-            git push origin main
-            cd ..
-          else
-            echo "✅ Wiki repo already exists."
+            echo "⚠️ Wiki not found on GitHub. Skipping wiki update this run."
+            echo "tip: Visit https://github.com/${{ github.repository }}/wiki and click 'Create the first page' once."
+            exit 0
           fi
 
       - name: Clone Wiki
@@ -317,7 +294,6 @@ jobs:
           echo "" >> "$FILE"
           echo "## 🔗 Latest Artifacts" >> "$FILE"
           echo "" >> "$FILE"
-
           for f in $(find ../app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null); do
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | cut -f1)
@@ -325,7 +301,6 @@ jobs:
             URL="https://github.com/${{ github.repository }}/releases/latest/download/$NAME"
             echo "- [$NAME]($URL) — $SIZE  \`$SHA\`" >> "$FILE"
           done
-
           echo "" >> "$FILE"
           echo "## 🧾 Recent Changes" >> "$FILE"
           echo "" >> "$FILE"
