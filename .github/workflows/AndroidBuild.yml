@@ -1,12 +1,12 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.2)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.3.2)
 # ------------------------------------------------------------
-# • QR code for https://ishizuki-tech.github.io/WhispersCpp-Android/
-# • Verified model info (Hugging Face + Jacaranda)
-# • Release history, link-only Pages/Wiki (no large files)
+# • Auto Model Download + Safe Check (Hugging Face + Jacaranda)
+# • Auto AndroidX + QR Code + Release History
+# • Pages & Wiki Link-Only (no large files)
 # ============================================================
 
-name: Android CI & Release (QR + Model Info + History)
+name: Android CI & Release (Auto Model + QR + History)
 
 on:
   workflow_dispatch:
@@ -39,14 +39,8 @@ env:
 jobs:
   review:
     runs-on: ubuntu-latest
-    env:
-      MODULE_PATH: app
-      BRANCH_NAME: ${{ inputs.branch }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BRANCH_NAME || github.ref_name }}
-
       - name: Enforce AndroidX
         run: |
           cat > gradle.properties <<'EOF'
@@ -57,15 +51,12 @@ jobs:
           org.gradle.configureondemand=true
           org.gradle.caching=true
           EOF
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
       - name: Lint & Unit tests (non-blocking)
         run: |
-          echo "android.useAndroidX=true" > gradle.properties
-          echo "android.enableJetifier=true" >> gradle.properties
           ./gradlew :app:lintDebug || echo "::warning::Lint failed"
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
@@ -75,13 +66,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: review
-    env:
-      MODULE_PATH: app
-      BRANCH_NAME: ${{ inputs.branch }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.BRANCH_NAME || github.ref_name }}
           fetch-depth: 0
           submodules: recursive
 
@@ -103,45 +90,57 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Gradle cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties','**/libs.versions.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Setup Gradle user properties
+      - name: Download Whisper models (auto + safe)
         run: |
-          mkdir -p ~/.gradle
-          cat <<'EOF' > ~/.gradle/gradle.properties
-          android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
-          org.gradle.parallel=true
-          org.gradle.configureondemand=true
-          org.gradle.caching=true
-          EOF
+          set -euo pipefail
+          mkdir -p app/src/main/assets/models
+          cd app/src/main/assets/models
+          echo "📦 Downloading Whisper models..."
 
-      - name: Download Whisper models
-        run: |
-          echo "📦 (model download section omitted for brevity — identical to v8.6.7g)"
+          download() {
+            name="$1"; shift
+            urls=("$@")
+            for u in "${urls[@]}"; do
+              echo "→ Trying $u"
+              if curl -fSL -A "curl/8.x (GitHub Actions)" --retry 3 --retry-delay 2 -o "$name.tmp" "$u"; then
+                mv "$name.tmp" "$name"
+                size=$(du -h "$name" | cut -f1)
+                echo "✅ Downloaded $name ($size)"
+                return 0
+              fi
+            done
+            echo "::error::Failed to fetch $name"
+            return 1
+          }
+
+          download ggml-tiny-q5_1.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin" \
+            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny-q5_1.bin"
+
+          download ggml-base-q5_1.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin" \
+            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base-q5_1.bin"
+
+          download ggml-small-q5_1.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+
+          download ggml-model-q4_0.bin \
+            "https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin"
+
+          echo "--- Downloaded files ---"
+          ls -lh
 
       - name: Build Release
         run: |
-          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
+          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon
 
       - id: collect
-        name: Collect artifacts
+        name: Collect Artifacts
         run: |
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
-          echo "files<<EOF" >> "$GITHUB_OUTPUT"
-          cat outputs/files.txt >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          xargs -a outputs/files.txt -r sha256sum
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"; cat outputs/files.txt >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "--- SHA256 ---"; xargs -a outputs/files.txt -r sha256sum
 
       - uses: actions/upload-artifact@v4
         with:
@@ -150,13 +149,11 @@ jobs:
           retention-days: 7
 
       - id: version
-        name: Extract versionName
         run: |
           VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - id: release
-        name: Prepare release notes
         run: |
           TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -171,7 +168,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ============================================================
-  # 🌐 Pages: Model Info + QR + Release History
+  # 🌐 Pages (QR + Model Info + History)
   # ============================================================
   pages:
     runs-on: ubuntu-latest
@@ -184,7 +181,7 @@ jobs:
           name: release-artifacts
           path: artifacts/
 
-      - name: Generate Fancy HTML (QR + Model Info)
+      - name: Generate HTML (QR + Model Info)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -192,7 +189,7 @@ jobs:
           mkdir -p gh-pages/downloads
           REPO="${{ github.repository }}"
           BASE_URL="https://${{ github.repository_owner }}.github.io/$(basename ${REPO})/"
-          QR_URL="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${BASE_URL}"
+          QR_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${BASE_URL}"
           GEN_TIME=$(date '+%Y-%m-%d %H:%M')
           curl -s -H "Authorization: token ${GH_TOKEN}" \
                -H "Accept: application/vnd.github+json" \
@@ -208,14 +205,14 @@ jobs:
             ul{list-style:none;padding:0;}
             a{color:#00eaff;text-decoration:none;font-weight:600;}
             a:hover{text-decoration:underline;}
-            footer{opacity:.6;margin-top:40px;font-size:.85em;}
-            .qr img{margin:20px auto;border-radius:12px;transition:transform .3s;}
-            .qr img:hover{transform:scale(1.15);}
-            .desc{opacity:.8;font-size:.9em;margin-bottom:10px;}
+            footer{opacity:.7;margin-top:40px;font-size:.85em;}
+            .qr img{margin:24px auto;border-radius:12px;transition:transform .3s;box-shadow:0 0 10px #00eaff;}
+            .qr img:hover{transform:scale(1.12);}
+            .desc{opacity:.85;font-size:.9em;margin-bottom:10px;}
           </style></head><body>
           <h1>📦 WhispersCpp-Android Downloads</h1>
           <div class="qr">
-            <img src="${QR_URL}" alt="QR to ${BASE_URL}">
+            <img src="${QR_URL}" alt="QR code">
             <div class="desc"><a href="${BASE_URL}" style="color:#88eaff">${BASE_URL}</a></div>
             <div class="desc">📱 Scan on your phone to open directly</div>
           </div>
@@ -224,22 +221,19 @@ jobs:
           <h2>🎧 Whisper Model Specifications</h2>
           <ul>
             <li><b>ggml-tiny-q5_1.bin</b> — <a href="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin">source</a><br>
-              • Multilingual (EN/JP/SW) | 39M params | 20MB | ~32× RT</li>
+              Multilingual (EN/JP/SW) • 39M params • 20MB • ~32× RT</li>
             <li><b>ggml-base-q5_1.bin</b> — <a href="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin">source</a><br>
-              • Balanced | 74M params | 57MB | ~16× RT</li>
+              Balanced • 74M params • 57MB • ~16× RT</li>
             <li><b>ggml-small-q5_1.bin</b> — <a href="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin">source</a><br>
-              • High accuracy | 244M params | 182MB | ~6× RT</li>
+              High accuracy • 244M params • 182MB • ~6× RT</li>
             <li><b>ggml-model-q4_0.bin</b> — <a href="https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin">source</a><br>
-              • Swahili-tuned | 74M params | 61MB | ~14× RT</li>
+              Swahili-tuned • 74M params • 61MB • ~14× RT</li>
           </ul>
 
           <h2>Latest Release</h2><ul>
           HTML
 
-          for f in $(find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -printf "%f\n" | sort); do
-            echo "<li><a href='https://github.com/${REPO}/releases/latest/download/$f'>$f</a></li>" >> gh-pages/downloads/index.html
-          done
-
+          find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -printf "<li><a href='https://github.com/${REPO}/releases/latest/download/%f'>%f</a></li>\n" | sort >> gh-pages/downloads/index.html
           echo "</ul><h2>Release History</h2><ul>" >> gh-pages/downloads/index.html
           jq -r '.[] | "- <a href=\"\(.html_url)\">\(.name // .tag_name)</a> (" + (.published_at[0:10]) + ")"' gh-pages/releases.json | sed 's/$/<br>/' >> gh-pages/downloads/index.html
           echo "</ul><footer>Files hosted on GitHub Releases • ${GEN_TIME}</footer></body></html>" >> gh-pages/downloads/index.html
@@ -250,10 +244,10 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update QR + model info + history"
+          commit_message: "Update QR + model info + release history"
 
   # ============================================================
-  # 📘 Wiki Sync — Model Info + History
+  # 📘 Wiki Sync
   # ============================================================
   wiki:
     runs-on: ubuntu-latest
@@ -284,8 +278,8 @@ jobs:
           echo "|:--|:--|:--|:--|:--|:--|" >> Downloads.md
           echo "| ggml-tiny-q5_1.bin | 39M | 20MB | ~32× RT | Multilingual (EN/JP/SW) | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-tiny-q5_1.bin) |" >> Downloads.md
           echo "| ggml-base-q5_1.bin | 74M | 57MB | ~16× RT | Balanced multilingual | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-base-q5_1.bin) |" >> Downloads.md
-          echo "| ggml-small-q5_1.bin | 244M | 182MB | ~6× RT | High accuracy (low-resource langs) | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin) |" >> Downloads.md
-          echo "| ggml-model-q4_0.bin | 74M | 61MB | ~14× RT | Swahili-tuned (African langs) | [Jacaranda ASR](https://huggingface.co/jboat/jacaranda-asr-whispercpp/blob/main/ggml-model-q4_0.bin) |" >> Downloads.md
+          echo "| ggml-small-q5_1.bin | 244M | 182MB | ~6× RT | High accuracy | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin) |" >> Downloads.md
+          echo "| ggml-model-q4_0.bin | 74M | 61MB | ~14× RT | Swahili-tuned | [Jacaranda ASR](https://huggingface.co/jboat/jacaranda-asr-whispercpp/blob/main/ggml-model-q4_0.bin) |" >> Downloads.md
           echo "" >> Downloads.md
           echo "## ✅ Latest Files" >> Downloads.md
           find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -print0 | sort -z | while IFS= read -r -d '' f; do
