@@ -308,5 +308,5 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git add Downloads.md
           git commit -m "Auto-update Wiki (QR + model info + history $(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
-          git branch -M main
-          git push "$WIKI_URL" main --force
+          git branch -M master
+          git push "$WIKI_URL" master --force
