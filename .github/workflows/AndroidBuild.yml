@@ -1,11 +1,12 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7f)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7g)
 # ------------------------------------------------------------
-# • workflow_dispatch のみ
-# • q4_0: HF(jboat) → Release(v1.0-2025-1101)
-# • tiny/base/small: HF → upstream（存在するパスのみ）
-# • GET実サイズ判定 + 任意SHA検証
-# • AndroidX強制（二重化）/ Gradle Cache / Fancy Pages / Wiki
+# • Trigger: workflow_dispatch のみ
+# • q4_0: PRIMARY = HF(jboat) → FALLBACK = Release(v1.0-2025-1101)  ※try/raw 不使用
+# • tiny/base/small: HF → upstream（存在するパスのみ／baseは base.bin も許容）
+# • GET 実サイズで判定（HEADは参考）+ 任意 SHA256 検証
+# • AndroidX 強制（二重化）/ Gradle Cache / Fancy Pages / Wiki 同期
+# • 修正: $GITHUB_OUTPUT の EOF 区切り子バグを解消（クォート無し EOF・行頭・単独行）
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -36,11 +37,15 @@ defaults:
 env:
   MODEL_RELEASE_TAG: v1.0-2025-1101
   CURL_UA: "curl/8.x (GitHub Actions; +https://github.com/actions)"
+  # 任意: 期待SHAを設定すると整合性チェックを実施（未設定ならスキップ）
   # MODEL_Q40_SHA256: ""
   # MODEL_TINY_SHA256: ""
   # MODEL_BASE_SHA256: ""
   # MODEL_SMALL_SHA256: ""
 
+# ============================================================
+# 🧠 Review
+# ============================================================
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -52,6 +57,7 @@ jobs:
         with:
           ref: ${{ env.BRANCH_NAME || github.ref_name }}
 
+      # AndroidX をプロジェクト直下で強制（後続ジョブでも冪等）
       - name: Enforce AndroidX (project gradle.properties)
         run: |
           cat > gradle.properties <<'EOF'
@@ -74,6 +80,9 @@ jobs:
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:lintDebug || echo "::warning::Lint failed (continuing)"
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:testDebugUnitTest || echo "::warning::Unit tests failed (continuing)"
 
+  # ============================================================
+  # 🏗️ Build & Release
+  # ============================================================
   build:
     runs-on: ubuntu-latest
     needs: review
@@ -128,6 +137,7 @@ jobs:
           org.gradle.caching=true
           EOF
 
+      # ----------------------- Models ------------------------
       - name: Download Whisper models (robust; no try/raw)
         env:
           # 保存名
@@ -149,7 +159,6 @@ jobs:
           U_HF_BASE_Q51:    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
           U_HF_BASE_EN_Q51: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
           U_HF_BASE_BIN:    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
-          # upstream は quant 版が存在しないことが多いので base.bin のみ用意
           U_UP_BASE_BIN:    https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base.bin
 
           # small
@@ -223,9 +232,9 @@ jobs:
           set -euo pipefail
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
-          echo "files<<EOF" >> $GITHUB_OUTPUT
-          cat outputs/files.txt >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          cat outputs/files.txt >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
           echo "Collected files:"; cat outputs/files.txt
           echo "--- SHA256 SUMS ---"; xargs -a outputs/files.txt -r sha256sum
 
@@ -240,7 +249,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: $VERSION"
 
       - id: release
@@ -248,12 +257,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
-          NOTES=$(git log -10 --pretty='* %s (%an)' || true)
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          NOTES="$(git log -10 --pretty='* %s (%an)' || true)"
           {
-            echo "body<<'EOF'"
+            echo "tag=$TAG"
+            echo "body<<EOF"
             echo "## What's Changed"
-            echo "${NOTES}"
+            echo "$NOTES"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -267,12 +276,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ============================================================
+  # 🌐 GitHub Pages — Fancy Glass UI
+  # ============================================================
   pages:
     runs-on: ubuntu-latest
     needs: build
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
@@ -323,21 +336,27 @@ jobs:
           publish_branch: gh-pages
           commit_message: "Update fancy downloads page ($(date '+%Y-%m-%d %H:%M'))"
 
+  # ============================================================
+  # 📘 Wiki Sync
+  # ============================================================
   wiki:
     runs-on: ubuntu-latest
     needs: pages
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
-          path: artifacts
+          path: artifacts/
+
       - name: Clone Wiki (skip if not exists)
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
             echo "⚠️ Wiki not found; skipping."; exit 0; fi
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
+
       - name: Update Downloads.md
         run: |
           set -euo pipefail
