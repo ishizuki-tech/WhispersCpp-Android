@@ -1,9 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7e)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6.7f)
 # ------------------------------------------------------------
 # • workflow_dispatch のみ
 # • q4_0: HF(jboat) → Release(v1.0-2025-1101)
-# • tiny/base/small: HF → upstream
+# • tiny/base/small: HF → upstream（存在するパスのみ）
 # • GET実サイズ判定 + 任意SHA検証
 # • AndroidX強制（二重化）/ Gradle Cache / Fancy Pages / Wiki
 # ============================================================
@@ -130,19 +130,30 @@ jobs:
 
       - name: Download Whisper models (robust; no try/raw)
         env:
+          # 保存名
           M_Q40:  ggml-model-q4_0.bin
           M_TINY: ggml-tiny-q5_1.bin
           M_BASE: ggml-base-q5_1.bin
           M_SMALL: ggml-small-q5_1.bin
 
+          # q4_0: HF(jboat) → Release(tag)
           U_HF_Q40:  https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
           U_REL_Q40: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
 
+          # tiny/base/small: HF → upstream（存在するパスのみ）
+          # tiny
           U_HF_TINY:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
-          U_HF_BASE:   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
-          U_HF_SMALL:  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           U_UP_TINY:   https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny-q5_1.bin
-          U_UP_BASE:   https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base-q5_1.bin
+
+          # base: 複数候補（q5_1 / en-q5_1 / base.bin）
+          U_HF_BASE_Q51:    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          U_HF_BASE_EN_Q51: https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin
+          U_HF_BASE_BIN:    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+          # upstream は quant 版が存在しないことが多いので base.bin のみ用意
+          U_UP_BASE_BIN:    https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base.bin
+
+          # small
+          U_HF_SMALL:  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           U_UP_SMALL:  https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-small-q5_1.bin
         run: |
           set -euo pipefail
@@ -152,14 +163,15 @@ jobs:
           echo "📦 Whisper ggml models — HEADは参考、最終判定はGETサイズ／任意SHA"
           echo "  MODEL_RELEASE_TAG=${MODEL_RELEASE_TAG}"
 
-          MIN_Q40=$((60 * 1024 * 1024))
-          MIN_TINY=$((25 * 1024 * 1024))
-          MIN_BASE=$((90 * 1024 * 1024))
-          MIN_SMALL=$((220 * 1024 * 1024))
+          # 実サイズの下限（q5_1に合わせて調整）
+          MIN_Q40=$((60 * 1024 * 1024))     # 60MB
+          MIN_TINY=$((20 * 1024 * 1024))    # 20MB  (tiny q5_1 想定)
+          MIN_BASE=$((55 * 1024 * 1024))    # 55MB  (base q5_1 実測 ~57MB)
+          MIN_SMALL=$((180 * 1024 * 1024))  # 180MB (small q5_1 想定)
 
           head_size () { curl -fsSIL -A "${CURL_UA}" -L "$1" | awk '/[Cc]ontent-[Ll]ength/ {print $2}' | tr -d '\r' || true; }
           curl_dl () { curl -fSL -A "${CURL_UA}" --retry 5 --retry-delay 2 -o "$2" "$1"; }
-          sha_check () { [ -z "${2:-}" ] && return 0; got=$(sha256sum "$1"|awk '{print $1}'); [ "$got" = "$2" ] || { echo "::error::SHA256 mismatch for $1"; return 1; }; echo "✅ SHA256 OK for $1"; }
+          sha_check () { [ -z "${2:-}" ] && return 0; got=$(sha256sum "$1"|awk '{print $1}'); [ "$got" = "$2" ] || { echo "::error::SHA256 mismatch for $1 (got=$got expect=$2)"; return 1; }; echo "✅ SHA256 OK for $1"; }
           download_chain () {
             local name="$1" min="$2"; shift 2; local urls=("$@")
             for u in "${urls[@]}"; do
@@ -174,15 +186,24 @@ jobs:
             done; return 1
           }
 
+          # q4_0: HF(jboat) → Release(tag)
           download_chain "${M_Q40}"  "${MIN_Q40}"  "${U_HF_Q40}"  "${U_REL_Q40}"  || { echo "::error::${M_Q40} fetch failed";  exit 1; }
-          [ -n "${MODEL_Q40_SHA256:-}"  ] && sha_check "${M_Q40}"  "${MODEL_Q40_SHA256}"
+          [ -n "${MODEL_Q40_SHA256:-}" ] && sha_check "${M_Q40}" "${MODEL_Q40_SHA256}"
 
+          # tiny: HF → upstream
           download_chain "${M_TINY}" "${MIN_TINY}" "${U_HF_TINY}" "${U_UP_TINY}" || { echo "::error::${M_TINY} failed";  exit 1; }
           [ -n "${MODEL_TINY_SHA256:-}" ] && sha_check "${M_TINY}" "${MODEL_TINY_SHA256}"
 
-          download_chain "${M_BASE}" "${MIN_BASE}" "${U_HF_BASE}" "${U_UP_BASE}" || { echo "::error::${M_BASE} failed";  exit 1; }
-          [ -n "${MODEL_BASE_SHA256:-}" ] && sha_check "${M_BASE}" "${MODEL_BASE_SHA256}"
+          # base: HF(q5_1 / en-q5_1 / base.bin) → upstream(base.bin)
+          #   ※ 保存名は M_BASE(=ggml-base-q5_1.bin) に統一
+          if download_chain "${M_BASE}" "${MIN_BASE}" \
+               "${U_HF_BASE_Q51}" "${U_HF_BASE_EN_Q51}" "${U_HF_BASE_BIN}" "${U_UP_BASE_BIN}"; then
+            [ -n "${MODEL_BASE_SHA256:-}" ] && sha_check "${M_BASE}" "${MODEL_BASE_SHA256}"
+          else
+            echo "::error::${M_BASE} download failed (tried q5_1/en-q5_1/base.bin variants)"; exit 1
+          fi
 
+          # small: HF → upstream
           download_chain "${M_SMALL}" "${MIN_SMALL}" "${U_HF_SMALL}" "${U_UP_SMALL}" || { echo "::error::${M_SMALL} failed"; exit 1; }
           [ -n "${MODEL_SMALL_SHA256:-}" ] && sha_check "${M_SMALL}" "${MODEL_SMALL_SHA256}"
 
