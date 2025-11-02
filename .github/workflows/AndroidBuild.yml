@@ -1,10 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.5)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v8.6)
 # ------------------------------------------------------------
-# • branch手動選択（未指定時: try）
-# • appモジュールのみビルド
-# • Pages: Fancy Glass UI + model/ABI info 表示
-# • Wiki/Release連携 + AndroidX強制
+# • 手動 branch 選択（未指定: try）
+# • app モジュールのみビルド
+# • Pages: Fancy Glass UI + model/ABI info
+# • Wiki/Release 同期 + AndroidX 強制 + rebase 安全化
 # ============================================================
 
 name: Android CI & Release (Full + Fancy Pages + Wiki)
@@ -23,9 +23,11 @@ on:
 
 permissions:
   contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
+
 defaults:
   run:
     shell: bash
@@ -68,7 +70,7 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: android-actions/setup-android@v3
 
-      - name: Gradle props
+      - name: Gradle properties
         run: |
           mkdir -p ~/.gradle
           cat <<'EOF' > ~/.gradle/gradle.properties
@@ -76,12 +78,14 @@ jobs:
           android.enableJetifier=true
           org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
           org.gradle.parallel=true
+          org.gradle.configureondemand=true
+          org.gradle.caching=true
           EOF
 
       # --------------------------------------------------------
-      # 📦 Download Whisper models from try branch (raw)
+      # 📦 Download Whisper models
       # --------------------------------------------------------
-      - name: Download Whisper models
+      - name: Download Whisper models (raw.githubusercontent)
         run: |
           mkdir -p app/src/main/assets/models
           declare -A MODELS=(
@@ -90,10 +94,11 @@ jobs:
             ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-small-q5_1.bin"
             ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-tiny-q5_1.bin"
           )
-          for name in "${!MODELS[@]}"; do
-            curl -fL -o "app/src/main/assets/models/$name" "${MODELS[$name]}"
+          echo "📥 Fetching Whisper models..."
+          for n in "${!MODELS[@]}"; do
+            curl -fL -o "app/src/main/assets/models/$n" "${MODELS[$n]}"
           done
-          echo "✅ Models downloaded:"; ls -lh app/src/main/assets/models
+          ls -lh app/src/main/assets/models
 
       - name: Build Release
         run: ./gradlew :app:clean :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon
@@ -147,22 +152,39 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: release-artifacts, path: artifacts }
 
-      - name: Generate fancy downloads
+      # 🔹 Fetch model metadata (for listing)
+      - name: Fetch model metadata
+        run: |
+          mkdir -p models
+          declare -A MODELS=(
+            ["ggml-base-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-base-q5_1.bin"
+            ["ggml-model-q4_0.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-model-q4_0.bin"
+            ["ggml-small-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-small-q5_1.bin"
+            ["ggml-tiny-q5_1.bin"]="https://raw.githubusercontent.com/ishizuki-tech/WhispersCpp-Android/try/app/src/main/assets/models/ggml-tiny-q5_1.bin"
+          )
+          for n in "${!MODELS[@]}"; do
+            curl -fLs -o "models/$n" "${MODELS[$n]}" || true
+          done
+          ls -lh models || true
+
+      - name: Generate fancy downloads HTML
         run: |
           mkdir -p gh-pages/downloads
           cat > gh-pages/downloads/index.html <<'HTML'
           <!doctype html>
-          <html lang="en">
-          <head>
+          <html lang="en"><head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">
           <title>📦 WhispersCpp-Android Downloads</title>
           <style>
-            body{font-family:Inter,system-ui;text-align:center;margin:0;padding:40px;background:linear-gradient(145deg,#101820,#203A43,#2C5364);color:#fff;}
-            h1{margin-bottom:10px;}
-            .card{backdrop-filter:blur(16px);background:rgba(255,255,255,0.08);border-radius:20px;padding:24px;margin:20px auto;width:80%;max-width:700px;box-shadow:0 8px 32px rgba(0,0,0,.3);}
-            ul{list-style:none;padding:0;}
-            li{margin:10px 0;}
+            body{font-family:Inter,system-ui;text-align:center;margin:0;padding:40px;
+              background:linear-gradient(145deg,#0f2027,#203a43,#2c5364);color:#fff;}
+            h1{margin-bottom:12px;}
+            .card{backdrop-filter:blur(14px);background:rgba(255,255,255,0.07);
+              border-radius:20px;padding:22px;margin:20px auto;width:80%;max-width:740px;
+              box-shadow:0 8px 32px rgba(0,0,0,.35);}
+            ul{list-style:none;padding:0;margin:0;}
+            li{margin:8px 0;}
             a{color:#00eaff;text-decoration:none;font-weight:600;}
             a:hover{text-decoration:underline;}
             code{background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:6px;}
@@ -181,17 +203,17 @@ jobs:
           done
 
           echo "</ul></div><div class='card'><h2>Embedded Models (ABI info)</h2><ul>" >> gh-pages/downloads/index.html
-          for m in $(find app/src/main/assets/models -type f -name "*.bin" 2>/dev/null); do
+          for m in $(find models -type f -name "*.bin" 2>/dev/null); do
             MNAME=$(basename "$m"); MSIZE=$(du -h "$m"|cut -f1)
             ABI=$(echo "$MNAME"|grep -Eo 'q[0-9_]+')
             echo "<li>$MNAME — $MSIZE <code>$ABI</code></li>" >> gh-pages/downloads/index.html
           done
-          echo "</ul></div><footer>Generated automatically by GitHub Actions • $(date '+%Y-%m-%d')</footer></body></html>" >> gh-pages/downloads/index.html
+          echo "</ul></div><footer>Generated automatically • $(date '+%Y-%m-%d')</footer></body></html>" >> gh-pages/downloads/index.html
 
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: gh-pages
+          publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           commit_message: "Update fancy downloads page ($(date '+%Y-%m-%d %H:%M'))"
 
@@ -225,4 +247,5 @@ jobs:
           done
           git add Downloads.md
           git commit -m "Auto-update Downloads ($(date '+%Y-%m-%d %H:%M'))" || true
+          git pull --rebase || true
           git push origin master || git push origin main || true
