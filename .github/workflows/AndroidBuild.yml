@@ -39,52 +39,12 @@ env:
   CURL_UA: "curl/8.x (GitHub Actions; +https://github.com/actions)"
   # MODEL_Q40_SHA256: ""   # 任意: 期待SHAを設定で整合性チェック
 
+# ============================================================
+# 🧠 Review
+# ============================================================
 jobs:
-  # ============================================================
-  # 🩺 Sanity — 起動/環境自己診断（手動起動時も先に確認）
-  # ============================================================
-  sanity:
-    runs-on: ubuntu-latest
-    env:
-      BRANCH_NAME: ${{ inputs.branch }}
-      U_HF_Q40:  https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
-      U_REL_Q40: ${{ format('https://github.com/{0}/releases/download/{1}/ggml-model-q4_0.bin', github.repository, env.MODEL_RELEASE_TAG) }}
-    steps:
-      - name: Print contexts
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "ref=${{ github.ref }}"
-          echo "ref_name=${{ github.ref_name }}"
-          echo "input.branch=${{ inputs.branch }}"
-          echo "branch_fallback=${{ env.BRANCH_NAME || github.ref_name }}"
-          echo "repository=${{ github.repository }}"
-          echo "actor=${{ github.actor }}"
-      - name: Check Actions enabled & token
-        run: |
-          test -n "${{ secrets.GITHUB_TOKEN }}" || { echo "::error::GITHUB_TOKEN is empty"; exit 1; }
-          echo "GITHUB_TOKEN length: ${#GITHUB_TOKEN}"
-      - name: Network reachability (HEAD advisory)
-        run: |
-          set -e
-          for u in "${U_HF_Q40}" "${U_REL_Q40}"; do
-            echo "HEAD $u"
-            curl -fsSIL -A "${CURL_UA}" -L "$u" | sed -n '1,20p' || true
-          done
-      - name: Network GET size test (won't save)
-        run: |
-          set -e
-          sz_hf=$(curl -fSL -A "${CURL_UA}" --retry 3 --retry-delay 2 "${U_HF_Q40}" | wc -c || echo 0)
-          echo "HF q4_0 GET size=${sz_hf}"
-          if [ "$sz_hf" -lt $((60*1024*1024)) ]; then
-            echo "::warning::HF q4_0 size below 60MB. Might be transient or blocked; fallback will be used later."
-          fi
-
-  # ============================================================
-  # 🧠 Review
-  # ============================================================
   review:
     runs-on: ubuntu-latest
-    needs: sanity
     env:
       MODULE_PATH: app
       BRANCH_NAME: ${{ inputs.branch }}
@@ -109,8 +69,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-
-      - name: Lint & UnitTest (non-blocking)
+      - name: Lint & UnitTest (non-blocking with warnings)
         run: |
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:lintDebug || echo "::warning::Lint failed (continuing)"
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:testDebugUnitTest || echo "::warning::Unit tests failed (continuing)"
@@ -157,9 +116,10 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties','**/libs.versions.toml') }}
-          restore-keys: ${{ runner.os }}-gradle-
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
-      - name: Setup Gradle user properties
+      - name: Setup Gradle properties
         run: |
           mkdir -p ~/.gradle
           cat <<'EOF' > ~/.gradle/gradle.properties
@@ -232,6 +192,9 @@ jobs:
           echo "--- Downloaded files ---"; ls -lh
 
       - name: Build Release
+        env:
+          ORG_GRADLE_PROJECT_android_useAndroidX: "true"
+          ORG_GRADLE_PROJECT_android_enableJetifier: "true"
         run: |
           set -euo pipefail
           ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
@@ -245,8 +208,10 @@ jobs:
           echo "files<<EOF" >> $GITHUB_OUTPUT
           cat outputs/files.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "Collected files:"; cat outputs/files.txt
-          echo "--- SHA256 SUMS ---"; xargs -a outputs/files.txt -r sha256sum
+          echo "Collected files:"
+          cat outputs/files.txt
+          echo "--- SHA256 SUMS ---"
+          xargs -a outputs/files.txt -r sha256sum
 
       - uses: actions/upload-artifact@v4
         with:
@@ -270,7 +235,12 @@ jobs:
           TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
           NOTES=$(git log -10 --pretty='* %s (%an)' || true)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          { echo "body<<'EOF'"; echo "## What's Changed"; echo "${NOTES}"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<'EOF'"
+            echo "## What's Changed"
+            echo "${NOTES}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         if: ${{ inputs.create_release == true }}
@@ -291,6 +261,7 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
@@ -350,15 +321,18 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           name: release-artifacts
           path: artifacts
+
       - name: Clone Wiki (skip if not exists)
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
             echo "⚠️ Wiki not found; skipping."; exit 0; fi
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
+
       - name: Update Downloads.md
         run: |
           set -euo pipefail
