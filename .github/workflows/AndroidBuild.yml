@@ -1,10 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.3)
+# ✅ WhispersCpp-Android — Full CI/CD Automation (Final Stable v7.6)
 # ------------------------------------------------------------
 # • branchを手動選択可能（未指定時は現在のbranch）
 # • 常に app モジュールをビルド
-# • downloads/index.html 修正版 + SHA256表示
-# • LFS無効化 / Wiki自動更新 / gh-pages安定動作
+# • Artifacts → Pages & Wiki 両方へリンク出力
+# • SHA256 + サイズ + Releaseリンク付き
 # ============================================================
 
 name: Android CI & Release (Full + Pages + Wiki)
@@ -67,18 +67,10 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
 
       - name: Run Lint
-        id: lint
-        run: ./gradlew :${{ env.MODULE_PATH }}:lintDebug || true
+        run: ./gradlew :app:lintDebug || true
 
       - name: Run Unit Tests
-        id: test
-        run: ./gradlew :${{ env.MODULE_PATH }}:testDebugUnitTest || true
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: lint-report
-          path: app/build/reports/lint-results.html
+        run: ./gradlew :app:testDebugUnitTest || true
 
   # ============================================================
   # 🏗️ Build + Release
@@ -90,23 +82,13 @@ jobs:
     env:
       MODULE_PATH: app
       BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.BRANCH_NAME }}
-          lfs: false
           fetch-depth: 0
+          lfs: false
           submodules: recursive
-
-      - name: Accept Android SDK Licenses
-        run: |
-          mkdir -p "$ANDROID_SDK_ROOT/licenses"
-          echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
 
       - uses: actions/setup-java@v4
         with:
@@ -117,74 +99,41 @@ jobs:
         with:
           ndk-version: ${{ inputs.ndk_version }}
 
-      - name: Install SDK components
-        run: |
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools" || true
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            app/.cxx
-            nativelib/.cxx
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/CMakeLists.txt') }}
-
-      - name: Setup gradle.properties
-        run: |
-          mkdir -p ~/.gradle
-          cat > ~/.gradle/gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
-          org.gradle.parallel=true
-          org.gradle.configureondemand=true
-          org.gradle.caching=true
-          EOF
-
-      - if: env.ANDROID_KEYSTORE_BASE64 != ''
-        name: Decode keystore
-        run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
-          echo "ANDROID_KEYSTORE_FILE=$PWD/keystore.jks" >> $GITHUB_ENV
-
       - name: Build Release
         run: |
-          ./gradlew :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace --no-daemon
+          ./gradlew :${{ env.MODULE_PATH }}:clean :${{ env.MODULE_PATH }}:assembleRelease :${{ env.MODULE_PATH }}:bundleRelease --stacktrace
 
       - id: collect
         run: |
-          ROOT="${MODULE_PATH}/build/outputs"
-          mkdir -p outputs_list
-          find "$ROOT" -type f \( -name '*.apk' -o -name '*.aab' \) > outputs_list/files.txt
+          mkdir -p outputs
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) > outputs/files.txt
           echo "files<<EOF" >> $GITHUB_OUTPUT
-          cat outputs_list/files.txt >> $GITHUB_OUTPUT
+          cat outputs/files.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          echo "Collected files:"
+          cat outputs/files.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
           path: ${{ steps.collect.outputs.files }}
-          retention-days: 14
+          retention-days: 3
+          if-no-files-found: error
 
       - id: version
         run: |
-          FILE="${MODULE_PATH}/build.gradle.kts"
-          VERSION=$(grep -E 'versionName' "$FILE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
+          VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - id: release
         run: |
-          TS=$(date '+%Y%m%d-%H%M')
-          TAG="v${{ steps.version.outputs.version }}-${TS}"
+          TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
           NOTES=$(git log -10 --pretty='* %s (%an)')
-          {
-            echo "tag=$TAG"
-            echo "body<<EOF"
-            echo "## What's Changed"
-            echo "$NOTES"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "## What's Changed" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - uses: softprops/action-gh-release@v2
         if: ${{ inputs.create_release == true }}
@@ -203,14 +152,18 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     if: ${{ inputs.create_release == true }}
-    env:
-      MODULE_PATH: app
-      BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.BRANCH_NAME }}
           fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts
+
+      - name: Debug artifact list
+        run: ls -lh artifacts
 
       - name: Setup Git identity
         run: |
@@ -223,67 +176,65 @@ jobs:
             git clone --branch gh-pages "https://github.com/${{ github.repository }}.git" gh-pages
           else
             git clone "https://github.com/${{ github.repository }}.git" gh-pages
-            cd gh-pages
-            git checkout --orphan gh-pages
+            cd gh-pages && git checkout --orphan gh-pages
             echo "<h1>Initializing GitHub Pages</h1>" > index.html
-            git add index.html
-            git commit -m "init gh-pages"
-            git push "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" gh-pages
+            git add index.html && git commit -m "init gh-pages" && git push origin gh-pages
           fi
 
-      - name: Generate downloads index (fixed)
+      - name: Generate downloads index
         run: |
           cd gh-pages
           mkdir -p downloads
           HTML="downloads/index.html"
-          echo "<html><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Branch: ${{ env.BRANCH_NAME }}</p><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
-          for f in $(find ../${{ env.MODULE_PATH }}/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \)); do
+          echo "<html><body><h1>📦 WhispersCpp-Android Downloads</h1><p>Generated: $(date '+%Y-%m-%d %H:%M')</p><ul>" > "$HTML"
+          for f in $(find ../artifacts -type f \( -name '*.apk' -o -name '*.aab' \)); do
             NAME=$(basename "$f")
-            cp "$f" "downloads/$NAME"
+            cp "$f" downloads/
             SIZE=$(du -h "$f" | cut -f1)
             SHA=$(sha256sum "$f" | cut -d' ' -f1)
             echo "<li><a href='$NAME'>$NAME</a> — $SIZE <code>$SHA</code></li>" >> "$HTML"
           done
           echo "</ul></body></html>" >> "$HTML"
 
-      - name: Deploy to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
+      - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
-          commit_message: "Auto-update downloads index ($(date '+%Y-%m-%d %H:%M'))"
+          commit_message: "Auto-update downloads ($(date '+%Y-%m-%d %H:%M'))"
 
   # ============================================================
   # 📘 GitHub Wiki
   # ============================================================
   wiki:
     runs-on: ubuntu-latest
-    needs: [build, pages]
+    needs: pages
     if: ${{ inputs.create_release == true }}
-    env:
-      MODULE_PATH: app
-      BRANCH_NAME: ${{ inputs.branch != '' && inputs.branch || github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.BRANCH_NAME }}
-          fetch-depth: 20
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: artifacts
+
+      - name: Debug artifact list
+        run: ls -lh artifacts
 
       - name: Setup Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Ensure Wiki exists
+      - name: Clone Wiki
         run: |
           if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
-            echo "⚠️ Wiki not found. Please create first page manually."
+            echo "⚠️ Wiki not found. Please create one manually first."
             exit 0
           fi
-
-      - name: Clone Wiki
-        run: git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
+          git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
 
       - name: Update Downloads.md
         run: |
@@ -291,12 +242,11 @@ jobs:
           FILE="Downloads.md"
           echo "# 📦 WhispersCpp-Android Downloads" > "$FILE"
           echo "" >> "$FILE"
-          echo "Branch: ${{ env.BRANCH_NAME }}" >> "$FILE"
           echo "Updated: $(date '+%Y-%m-%d %H:%M')" >> "$FILE"
           echo "" >> "$FILE"
           echo "## 🔗 Latest Artifacts" >> "$FILE"
           echo "" >> "$FILE"
-          for f in $(find ../${{ env.MODULE_PATH }}/build/outputs -type f \( -name '*.apk' -o -name '*.aab' \) 2>/dev/null); do
+          for f in $(find ../artifacts -type f \( -name '*.apk' -o -name '*.aab' \)); do
             NAME=$(basename "$f")
             SIZE=$(du -h "$f" | cut -f1)
             SHA=$(sha256sum "$f" | cut -d' ' -f1)
@@ -305,11 +255,11 @@ jobs:
           done
           echo "" >> "$FILE"
           echo "## 🧾 Recent Changes" >> "$FILE"
-          git -C ../ log -10 --pretty='* %s (%an)' >> "$FILE"
+          git -C ../ log -8 --pretty='* %s (%an)' >> "$FILE"
 
       - name: Commit & Push Wiki
         run: |
           cd wiki
           git add Downloads.md
-          git commit -m "Auto-update Wiki Downloads.md ($(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
-          git push origin master || true
+          git commit -m "Update Downloads ($(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
+          git push origin master || git push origin main || true
