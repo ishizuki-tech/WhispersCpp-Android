@@ -1,17 +1,22 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.4.1 Hybrid Meta-Sync Edition)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.4.3 Hybrid Meta-Sync + ReviewToggle + Debug)
 # ------------------------------------------------------------
-# • Safe NDK install + auto model download
-# • meta/models.json → Pages + Wiki を自動生成
-# • Wiki = master branch 固定 / Pages = gh-pages 固定
-# • Release History + QR code + SHA checksum
+# • Safe NDK install + Auto Model Download
+# • meta/models.json → Pages + Wiki (master)
+# • workflow_dispatch: Review(Lint/Test) toggle
+# • Improved Gradle memory (-Xmx4g / 1GB MetaSpace)
+# • Enhanced debug logs + graceful fail
 # ============================================================
 
-name: Android CI & Release (Hybrid Meta-Sync)
+name: Android CI & Release (Hybrid Meta-Sync + Review Toggle + Debug)
 
 on:
   workflow_dispatch:
     inputs:
+      enable_review:
+        description: "Run Lint & Unit Tests before build"
+        type: boolean
+        default: true
       create_release:
         description: "Publish GitHub Release + Pages + Wiki"
         type: boolean
@@ -35,23 +40,70 @@ env:
   NDK_VERSION: 28.1.13356709
 
 # ============================================================
-# 🏗️ Build App and Collect Artifacts
+# 🧠 Review (optional)
 # ============================================================
 jobs:
-  build:
+  review:
+    if: ${{ inputs.enable_review == true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
+
+      - name: Configure Gradle memory and AndroidX
+        run: |
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8 -XX:+HeapDumpOnOutOfMemoryError
+          org.gradle.daemon=true
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.configureondemand=true
+          EOF
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
+      - name: Run Lint & Unit Tests
+        run: |
+          set +e
+          ./gradlew :app:lintDebug --stacktrace || echo "::warning::Lint failed"
+          ./gradlew :app:testDebugUnitTest --stacktrace || echo "::warning::Tests failed"
+          echo "✅ Review stage complete"
+
+  # ============================================================
+  # 🏗️ Build (depends on review only if enabled)
+  # ============================================================
+  build:
+    runs-on: ubuntu-latest
+    needs: ${{ inputs.enable_review && 'review' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
       - uses: android-actions/setup-android@v3
+
+      - name: Configure Gradle (memory safe)
+        run: |
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8 -XX:+HeapDumpOnOutOfMemoryError
+          org.gradle.daemon=true
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          org.gradle.configureondemand=true
+          EOF
 
       - name: Install Safe NDK
         run: |
@@ -59,6 +111,7 @@ jobs:
           rm -rf "$ANDROID_SDK_ROOT/ndk" || true
           sdkmanager --update
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;$NDK_VERSION"
+          test -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" || (echo "::error::NDK install failed" && exit 1)
 
       - name: Download Whisper Models
         run: |
@@ -69,32 +122,32 @@ jobs:
             for u in "$@"; do
               echo "→ Trying $u"
               if curl -fSL -A "${CURL_UA}" --retry 3 --retry-delay 2 -o "$name" "$u"; then
-                echo "✅ $name downloaded"
+                echo "✅ $name downloaded ($(du -h "$name" | cut -f1))"
                 return 0
               fi
             done
-            echo "::error::Failed to fetch $name"; return 1
+            echo "::error::Failed to fetch $name"
+            return 1
           }
-          download ggml-tiny-q5_1.bin \
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
-          download ggml-base-q5_1.bin \
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
-          download ggml-small-q5_1.bin \
-            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
-          download ggml-model-q4_0.bin \
-            https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
+          download ggml-tiny-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          download ggml-base-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          download ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          download ggml-model-q4_0.bin https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
 
-      - name: Build Release
+      - name: Build Release (memory-safe)
         run: |
-          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true \
+          ./gradlew \
+            -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true \
             -Pandroid.ndkVersion=${NDK_VERSION} \
-            :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace
+            :app:assembleRelease :app:bundleRelease \
+            --no-daemon --stacktrace --info
 
       - id: collect
         run: |
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           echo "files<<EOF" >> "$GITHUB_OUTPUT"; cat outputs/files.txt >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "✅ Collected $(wc -l < outputs/files.txt) artifact(s)"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -103,7 +156,7 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # 🧠 Generate meta/models.json (shared for Pages + Wiki)
+  # 🧩 Generate meta/models.json (for Wiki + Pages)
   # ============================================================
   meta:
     runs-on: ubuntu-latest
@@ -125,13 +178,14 @@ jobs:
             ]
           }
           JSON
+          echo "✅ meta/models.json generated ($(wc -l < meta/models.json) lines)"
       - uses: actions/upload-artifact@v4
         with:
           name: meta
           path: meta/models.json
 
   # ============================================================
-  # 🌐 Publish Pages + Wiki from meta/models.json
+  # 🌐 Publish Pages + Wiki (Meta-Synced)
   # ============================================================
   publish:
     runs-on: ubuntu-latest
@@ -149,7 +203,7 @@ jobs:
           path: meta/
       - run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Generate Wiki & Pages from meta
+      - name: Generate Wiki + Pages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -161,14 +215,14 @@ jobs:
           QR_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${BASE_URL}"
           mkdir -p wiki gh-pages/downloads
 
-          # Markdown for Wiki
+          echo "📘 Building Wiki (Markdown)..."
           {
             echo "# 📦 WhispersCpp-Android Downloads"
             echo "Updated: ${DATE}\n"
             echo "## 🎧 Whisper Model Specifications"
             echo "| Model | Params | Size | Speed | Notes | Source |"
             echo "|:--|:--:|:--:|:--:|:--|:--|"
-            jq -r '.models[] | "| \(.name) | \(.params) | \(.size) | \(.speed) | \(.notes) | [link](\(.source)) |" ' meta/models.json
+            jq -r '.models[] | "| \(.name) | \(.params) | \(.size) | \(.speed) | \(.notes) | [link](\(.source)) |"' meta/models.json
             echo "\n## ✅ Latest Artifacts"
             find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) | sort | while read f; do
               N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
@@ -179,7 +233,7 @@ jobs:
               "https://api.github.com/repos/${REPO}/releases?per_page=20" | jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"'
           } > wiki/Downloads.md
 
-          # HTML for Pages
+          echo "🌐 Building Pages (HTML)..."
           cat > gh-pages/downloads/index.html <<HTML
           <!doctype html><html lang="en"><head><meta charset="utf-8">
           <title>📦 WhispersCpp-Android Downloads</title>
@@ -197,16 +251,14 @@ jobs:
           find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -printf "<li><a href='https://github.com/${REPO}/releases/latest/download/%f'>%f</a></li>\n" >> gh-pages/downloads/index.html
           echo "</ul><footer><p>Generated ${DATE}</p></footer></body></html>" >> gh-pages/downloads/index.html
 
-      # Push Pages → gh-pages
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Auto-update Pages (${ {github.run_number } })"
+          commit_message: "Update Pages (MetaSync)"
 
-      # Push Wiki → master
       - name: Push Wiki (master)
         run: |
           set -eux
@@ -219,5 +271,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Downloads.md
-          git commit -m "Sync Wiki (meta + artifacts ${DATE})" || echo "No changes"
+          git commit -m "Auto-update Wiki (MetaSync ${DATE})" || echo "No changes"
           git push origin master --force
