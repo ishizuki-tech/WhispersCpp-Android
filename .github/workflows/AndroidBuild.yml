@@ -266,47 +266,88 @@ jobs:
             echo "⚠️ Wiki not found; skipping."; exit 0; fi
           git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
 
-      - name: Update Downloads.md
+      - name: Update Downloads.md (Wiki, English, Final)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -xeuo pipefail
+          
           REPO="${{ github.repository }}"
-          WIKI_URL="https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
-
+          ACTOR="${{ github.actor }}"
+          WIKI_URL="https://${ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
+          
           echo "📘 Cleaning any old wiki folder..."
           rm -rf wiki || true
-
+          
           echo "📘 Cloning Wiki repository..."
-          git clone "$WIKI_URL" wiki
+          if ! git clone "$WIKI_URL" wiki; then
+            echo "⚠️ Wiki clone failed. Enable via:"
+            echo "   GitHub → Settings → General → Features → ✅ Wikis"
+            exit 1
+          fi
           cd wiki
-
-          echo "# 📦 WhispersCpp-Android Downloads" > Downloads.md
-          echo "Updated: $(date '+%Y-%m-%d %H:%M')" >> Downloads.md
-          echo "" >> Downloads.md
-          echo "## 🎧 Whisper Model Specifications" >> Downloads.md
-          echo "| Model | Params | Size | Speed | Notes | Source |" >> Downloads.md
-          echo "|:--|:--|:--|:--|:--|:--|" >> Downloads.md
-          echo "| ggml-tiny-q5_1.bin | 39M | 20MB | ~32× RT | Multilingual (EN/JP/SW) | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-tiny-q5_1.bin) |" >> Downloads.md
-          echo "| ggml-base-q5_1.bin | 74M | 57MB | ~16× RT | Balanced multilingual | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-base-q5_1.bin) |" >> Downloads.md
-          echo "| ggml-small-q5_1.bin | 244M | 182MB | ~6× RT | High accuracy | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin) |" >> Downloads.md
-          echo "| ggml-model-q4_0.bin | 74M | 61MB | ~14× RT | Swahili-tuned | [Jacaranda ASR](https://huggingface.co/jboat/jacaranda-asr-whispercpp/blob/main/ggml-model-q4_0.bin) |" >> Downloads.md
-          echo "" >> Downloads.md
-          echo "## ✅ Latest Files" >> Downloads.md
-          find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -print0 | sort -z | while IFS= read -r -d '' f; do
-            N=$(basename "$f"); S=$(du -h "$f"|cut -f1); H=$(sha256sum "$f"|cut -d' ' -f1)
-            echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S  \`$H\`" >> Downloads.md
-          done
-          echo "" >> Downloads.md
-          echo "## 🕓 Historical Releases" >> Downloads.md
-          curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
-            jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' >> Downloads.md
-
-          echo "✅ Committing & pushing Wiki..."
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-          git add Downloads.md
-          git commit -m "Auto-update Wiki (QR + model info + history $(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
-          git branch -M master
-          git push "$WIKI_URL" master --force
+          
+          # Build Downloads.md via a heredoc (clean & safe)
+          cat > Downloads.md <<'EOF'
+          # 📦 WhispersCpp-Android Downloads
+          Updated: DATE_PLACEHOLDER
+          
+          ## 🎧 Whisper Model Specifications
+            
+            > **Notes**
+            > - **Params** correspond to the original OpenAI Whisper model sizes (tiny = 39 M, base = 74 M, small = 244 M, medium = 769 M).
+            > - **Size** is the approximate GGML `.bin` file size on Hugging Face; slight variation may occur by commit.
+            > - **Speed (RT = real-time)** is a *reference range*; actual RTF depends on CPU/GPU, threads, and I/O.
+            > - The Jacaranda Swahili model is a Whisper-medium fine-tune; the linked GGML is a community q4_0 build.
+            
+            | Model | Params | Size | Speed (ref) | Notes | Source |
+            |:--|:--:|:--:|:--:|:--|:--|
+            | `ggml-tiny-q5_1.bin`  | 39 M             | ~32 MB    | ~10–30× RT | Multilingual (EN/JA/SW) | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-tiny-q5_1.bin) |
+            | `ggml-base-q5_1.bin`  | 74 M             | ~59.7 MB  | ~6–20× RT  | Balanced multilingual    | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-base-q5_1.bin) |
+            | `ggml-small-q5_1.bin` | 244 M            | ~190 MB   | ~4–8× RT   | Higher accuracy          | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin) |
+            | `ggml-model-q4_0.bin` | ~769 M (medium)  | 444 MB    | ~1–3× RT   | Swahili-tuned (GGML q4_0) | [Jacaranda (jboat)](https://huggingface.co/jboat/jacaranda-asr-whispercpp/blob/main/ggml-model-q4_0.bin) |
+          
+          ## ✅ Latest Files
+            EOF
+            
+            # Insert current timestamp
+            sed -i.bak "s|DATE_PLACEHOLDER|$(date '+%Y-%m-%d %H:%M')|g" Downloads.md
+            rm -f Downloads.md.bak
+          
+          # Append artifact list (if any)
+            {
+              if find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) | grep -q . ; then
+              find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -print0 | sort -z | while IFS= read -r -d '' f; do
+              N=$(basename "$f")
+              S=$(du -h "$f" | cut -f1)
+              H=$(sha256sum "$f" | cut -d' ' -f1)
+              printf -- "- [%s](https://github.com/%s/releases/latest/download/%s) — %s  \`%s\`\n" "$N" "$REPO" "$N" "$S" "$H"
+              done
+              echo
+              else
+              echo "- (No build artifacts found in \`../artifacts\` at build time.)"
+              echo
+              fi
+            } >> Downloads.md
+            
+            # Append historical releases (best-effort)
+            {
+              echo "## 🕓 Historical Releases"
+              if command -v jq >/dev/null 2>&1; then
+                curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
+                  jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' || \
+                  echo "- (Failed to list releases.)"
+              else
+                echo "- (jq not available on runner; skipping release list.)"
+              fi
+            } >> Downloads.md
+            
+            echo "✅ Committing & pushing Wiki..."
+            git config user.name "${ACTOR}"
+            git config user.email "${ACTOR}@users.noreply.github.com"
+            git add Downloads.md
+            git commit -m "Auto-update Wiki (model info + artifacts + history $(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
+            git branch -M master
+            git push "$WIKI_URL" master --force
+            ```
