@@ -1,13 +1,13 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.6 Fallback-Stable + Glass UI)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.7 Fallback-Stable + Glass UI)
 # ------------------------------------------------------------
 # • Branch input (main / try / dev)
-# • Smart Build Skip + MetaAlways
-# • Rich Wiki + Modern Glass Pages
+# • Smart Build Skip (strict source diff) + MetaAlways
+# • Rich Wiki (QR + Release History 20件) + Modern Glass Pages
 # • ✅ Auto fallback when artifact missing
 # • ♻️ Use latest Release assets if needed
 # • 🧩 Fix git identity + AndroidX auto-enable
-# • 🚫 Skip tag update if no build change
+# • 🚫 Tag update ONLY when build ran
 # ============================================================
 
 name: Android CI & Release (Fallback-Stable Glass UI)
@@ -46,7 +46,7 @@ env:
   NDK_VERSION: 28.1.13356709
 
 # ============================================================
-# 🧠 Detect + Tag
+# 🧠 Detect (strict) + optional Review
 # ============================================================
 jobs:
   detect:
@@ -59,27 +59,62 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.branch || github.ref_name }}
+
       - id: tag
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG:-<none>}"
+
       - id: check
         run: |
+          set -e
+          TARGETS="app/ nativelib/"
+          echo "🔍 Checking for changes in: $TARGETS"
           if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
-            CHANGED=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD app/ nativelib/ | wc -l)
+            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS \
+                    | grep -E '\.(kt|java|ktx|cpp|cc|c|h|hpp|cmake|gradle|kts|xml|aidl|pro)$' || true)
           else
-            CHANGED=1
+            # 初回（タグなし）はビルド実行
+            DIFF="(initial-build)"
           fi
-          echo "changed=$([ "$CHANGED" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "📊 Files changed: $CHANGED"
+
+          if [ -n "$DIFF" ] && [ "$DIFF" != "(initial-build)" ]; then
+            echo "🧩 Changed files:"; echo "$DIFF"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DIFF" = "(initial-build)" ]; then
+            echo "🧩 Initial run without tag -> build"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ No source changes detected; skipping build."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "📊 Done."
+
+  review:
+    runs-on: ubuntu-latest
+    needs: detect
+    if: ${{ inputs.enable_review == true }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.ref_name }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: Lint & Unit tests (non-blocking)
+        run: |
+          ./gradlew :app:lintDebug || echo "::warning::Lint failed"
+          ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
   # ============================================================
   # 🏗️ Build (only if changed)
   # ============================================================
   build:
     runs-on: ubuntu-latest
-    needs: detect
+    needs: [detect]
     if: ${{ needs.detect.outputs.changed == 'true' }}
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +122,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           ref: ${{ inputs.branch || github.ref_name }}
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -106,6 +142,7 @@ jobs:
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           echo "files<<EOF" >> "$GITHUB_OUTPUT"; cat outputs/files.txt >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
@@ -113,7 +150,7 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # 🧩 Meta
+  # 🧩 Meta (Tag only when build ran)
   # ============================================================
   meta:
     runs-on: ubuntu-latest
@@ -131,18 +168,17 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # ✅ Tag only when build actually ran
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.6.6-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.6.7-$(date '+%Y%m%d-%H%M')"
             git tag -a "$TAG" -m "Auto-tag (build changed)"
             git push origin "$TAG"
             echo "🪶 Tagged new version: $TAG"
           else
+            # 変更なし：タグは更新しない（存在しない場合は 'unreleased' を明示）
             TAG="${{ needs.detect.outputs.last_tag }}"
-            echo "🪶 No code changes detected — keeping existing tag: $TAG"
+            if [ -z "$TAG" ]; then TAG="unreleased"; fi
+            echo "🪶 No source changes — keeping tag: $TAG"
           fi
-
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: 🧠 Meta JSON
@@ -151,13 +187,14 @@ jobs:
           DATE=$(date '+%Y-%m-%d %H:%M')
           jq -n --arg g "$DATE" --arg t "${{ steps.tag.outputs.tag_name }}" \
             '{generated:$g, version_tag:$t, note:"Meta generated automatically"}' > meta/models.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: meta
           path: meta/models.json
 
   # ============================================================
-  # 🌐 Publish (with Fallback)
+  # 🌐 Publish (Release + Pages + Wiki) with Fallback
   # ============================================================
   publish:
     runs-on: ubuntu-latest
@@ -190,6 +227,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y jq unzip
           mkdir -p artifacts
           REPO="${{ github.repository }}"
+
           if [ -z "$(ls -A artifacts 2>/dev/null || true)" ]; then
             echo "🪶 No current artifacts; fetching previous successful run..."
             RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -205,15 +243,30 @@ jobs:
               fi
             fi
           fi
+
           if [ -z "$(ls -A artifacts 2>/dev/null || true)" ]; then
-            echo "🪶 Still no artifacts; using latest release assets"
+            echo "🪶 Still no artifacts; will use latest release assets for listing"
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/releases/latest" > release.json
-            jq -r '.assets[] | select(.name|test("\\.(apk|aab)$")) | [.name, (.size|tostring), .browser_download_url] | @tsv' release.json \
-              > artifacts/_release_assets.tsv
+              "https://api.github.com/repos/${REPO}/releases/latest" > release.json || true
+            if [ -s release.json ]; then
+              jq -r '.assets[] | select(.name|test("\\.(apk|aab)$")) | [.name, (.size|tostring), .browser_download_url] | @tsv' release.json \
+                > artifacts/_release_assets.tsv || true
+            fi
           fi
 
-      - name: 🌈 Generate Modern Glass UI Page + Wiki
+      - name: 🚀 Create/Update Release (only if we actually built artifacts)
+        if: ${{ needs.meta.outputs.changed == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.meta.outputs.tag_name }}
+          name: "WhispersCpp Release ${{ needs.meta.outputs.tag_name }}"
+          files: artifacts/*.apk,artifacts/*.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🌈 Generate Modern Glass UI Page + Wiki (QR + History 20)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           TAG=${{ needs.meta.outputs.tag_name }}
@@ -223,33 +276,51 @@ jobs:
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           mkdir -p wiki gh-pages/downloads
 
-          echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
-          echo "Updated: ${DATE}\n" >> wiki/Downloads.md
-          jq . meta/models.json >> wiki/Downloads.md
-          echo "\n## 🧩 Build Artifacts\n" >> wiki/Downloads.md
+          # ---------- Wiki ----------
+          {
+            echo "# 📦 WhispersCpp-Android (${TAG})"
+            echo "Updated: ${DATE}"
+            echo
+            cat meta/models.json
+            echo
+            echo "## 🧩 Build Artifacts"
+            if [ -f artifacts/_release_assets.tsv ]; then
+              echo "_Using latest release assets_"
+              while IFS=$'\t' read -r N S U; do
+                echo "- [$N]($U) — ${S} bytes"
+              done < artifacts/_release_assets.tsv
+            else
+              shopt -s nullglob
+              for f in artifacts/*.apk artifacts/*.aab; do
+                N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+                echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/$N) — $S \`$H\`"
+              done
+              shopt -u nullglob
+            fi
+            echo
+            echo "## 🕓 Release History"
+            echo "> Last 20 releases on GitHub"
+            curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/releases?per_page=20" \
+              | jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' || echo "- (History unavailable.)"
+            echo
+            echo "<div align=\"center\">"
+            echo "<img src=\"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${BASE_URL}\" alt=\"QR\" width=\"180\" height=\"180\"><br>"
+            echo "🔗 <a href=\"${BASE_URL}\">Open Glass UI Downloads Page</a>"
+            echo "</div>"
+          } > wiki/Downloads.md
 
-          if [ -f artifacts/_release_assets.tsv ]; then
-            echo "♻️ Using latest release assets" >> wiki/Downloads.md
-            while IFS=$'\t' read -r N S U; do
-              echo "- [$N]($U) — ${S} bytes" >> wiki/Downloads.md
-            done < artifacts/_release_assets.tsv
-          else
-            for f in artifacts/*.apk artifacts/*.aab; do
-              [ -f "$f" ] || continue
-              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
-              echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S \`$H\`" >> wiki/Downloads.md
-            done
-          fi
-
+          # ---------- Pages (Glass UI) ----------
           cat > gh-pages/downloads/index.html <<HTML
           <!doctype html>
           <html lang="en"><head><meta charset="utf-8"/>
           <title>📦 WhispersCpp-Android Downloads</title>
+          <meta name="viewport" content="width=device-width,initial-scale=1"/>
           <style>
             body{font-family:'Inter',system-ui;background:radial-gradient(circle at top left,#1b2735,#090a0f);
-            color:#e0e0e0;text-align:center;padding:40px;}
+            color:#e0e0e0;text-align:center;padding:40px;margin:0}
             .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 4px 40px rgba(0,0,0,0.3);
-            backdrop-filter:blur(12px);padding:30px;margin:auto;width:85%;max-width:900px;}
+            backdrop-filter:blur(12px);padding:30px;margin:40px auto;width:92%;max-width:960px;}
             table{width:100%;border-collapse:collapse;margin-top:20px;}
             th,td{padding:12px;border-bottom:1px solid rgba(255,255,255,0.1);}
             tr:hover{background-color:rgba(255,255,255,0.05);}
@@ -258,8 +329,8 @@ jobs:
           </style></head><body>
             <div class="glass">
               <h1>📦 WhispersCpp-Android</h1>
-              <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${BASE_URL}" width="100"></p>
-              <p>Updated: ${DATE}</p>
+              <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${BASE_URL}" width="110" height="110" alt="QR"></p>
+              <p>Tag: ${TAG} &nbsp;•&nbsp; Updated: ${DATE}</p>
               <table><tr><th>File</th><th>Size</th><th>SHA256</th></tr>
           HTML
 
@@ -268,17 +339,36 @@ jobs:
               echo "<tr><td><a href=\"$U\">$N</a></td><td>${S}</td><td>—</td></tr>" >> gh-pages/downloads/index.html
             done < artifacts/_release_assets.tsv
           else
+            shopt -s nullglob
             for f in artifacts/*.apk artifacts/*.aab; do
-              [ -f "$f" ] || continue
               N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
-              echo "<tr><td><a href=\"../$N\">$N</a></td><td>${S}</td><td><code>${H}</code></td></tr>" >> gh-pages/downloads/index.html
+              echo "<tr><td><a href=\"https://github.com/${REPO}/releases/download/${TAG}/${N}\">${N}</a></td><td>${S}</td><td><code>${H}</code></td></tr>" >> gh-pages/downloads/index.html
             done
+            shopt -u nullglob
           fi
 
           cat >> gh-pages/downloads/index.html <<'HTML'
-              </table><footer>Generated automatically by CI/CD v9.6.6 Fallback-Stable</footer>
+              </table>
+              <footer>Generated automatically by CI/CD v9.6.7 Fallback-Stable</footer>
             </div></body></html>
           HTML
+
+      - name: 📘 Push Wiki
+        run: |
+          set -e
+          REPO="${{ github.repository }}"
+          ACTOR="${{ github.actor }}"
+          WIKI_URL="https://${ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
+          rm -rf wiki.push && cp -r wiki wiki.push
+          cd wiki.push
+          git init
+          git config user.name "${ACTOR}"
+          git config user.email "${ACTOR}@users.noreply.github.com"
+          git add Downloads.md
+          git commit -m "Auto-update Wiki (QR + artifacts + history v9.6.7)"
+          git branch -M master
+          git remote add origin "$WIKI_URL"
+          git push origin master --force
 
       - uses: peaceiris/actions-gh-pages@v4
         with:
@@ -286,4 +376,4 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update Pages (v9.6.6 Fallback-Stable)"
+          commit_message: "Update Pages (v9.6.7 Fallback-Stable)"
