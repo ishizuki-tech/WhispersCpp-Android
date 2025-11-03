@@ -1,11 +1,12 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.4 Fallback-Stable + Glass UI)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.5 Fallback-Stable + Glass UI)
 # ------------------------------------------------------------
 # • Branch input (main / try / dev)
 # • Smart Build Skip + MetaAlways
 # • Rich Wiki + Modern Glass Pages
 # • ✅ Auto fallback when artifact missing
 # • ♻️ Use latest Release assets if needed
+# • 🧩 Fix git identity + AndroidX auto-enable
 # ============================================================
 
 name: Android CI & Release (Fallback-Stable Glass UI)
@@ -89,8 +90,15 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+
+      - name: 🧠 Ensure AndroidX enabled
+        run: |
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.enableJetifier=true" >> gradle.properties
+
       - name: 🧩 Build Release
         run: ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --info
+
       - id: collect
         run: |
           mkdir -p outputs
@@ -118,8 +126,10 @@ jobs:
           ref: ${{ inputs.branch || github.ref_name }}
       - id: tag
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.6.4-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.6.5-$(date '+%Y%m%d-%H%M')"
             git tag -a "$TAG" -m "Auto-tag"
             git push origin "$TAG"
           else
@@ -138,7 +148,7 @@ jobs:
           path: meta/models.json
 
   # ============================================================
-  # 🌐 Publish (always safe)
+  # 🌐 Publish (with Fallback)
   # ============================================================
   publish:
     runs-on: ubuntu-latest
@@ -164,14 +174,13 @@ jobs:
           path: artifacts/
 
       - name: ♻️ Fallback to latest successful artifacts or release assets
-        id: fallback
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
+          sudo apt-get update && sudo apt-get install -y jq unzip
           mkdir -p artifacts
           REPO="${{ github.repository }}"
-          # fallback 1: last successful run
           if [ -z "$(ls -A artifacts 2>/dev/null || true)" ]; then
             echo "🪶 No current artifacts; fetching previous successful run..."
             RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -187,7 +196,6 @@ jobs:
               fi
             fi
           fi
-          # fallback 2: latest release assets
           if [ -z "$(ls -A artifacts 2>/dev/null || true)" ]; then
             echo "🪶 Still no artifacts; using latest release assets"
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -196,11 +204,7 @@ jobs:
               > artifacts/_release_assets.tsv
           fi
 
-      - run: sudo apt-get update && sudo apt-get install -y jq
-
       - name: 🌈 Generate Modern Glass UI Page + Wiki
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           TAG=${{ needs.meta.outputs.tag_name }}
@@ -215,7 +219,6 @@ jobs:
           jq . meta/models.json >> wiki/Downloads.md
           echo "\n## 🧩 Build Artifacts\n" >> wiki/Downloads.md
 
-          # Collect artifacts list
           if [ -f artifacts/_release_assets.tsv ]; then
             echo "♻️ Using latest release assets" >> wiki/Downloads.md
             while IFS=$'\t' read -r N S U; do
@@ -224,49 +227,26 @@ jobs:
           else
             for f in artifacts/*.apk artifacts/*.aab; do
               [ -f "$f" ] || continue
-              N=$(basename "$f")
-              S=$(du -h "$f" | cut -f1)
-              H=$(sha256sum "$f" | cut -d' ' -f1)
+              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
               echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S \`$H\`" >> wiki/Downloads.md
             done
           fi
 
-          # Generate Glass UI HTML
           cat > gh-pages/downloads/index.html <<HTML
           <!doctype html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8"/>
-            <title>📦 WhispersCpp-Android Downloads</title>
-            <style>
-              body {
-                font-family: 'Inter',system-ui;
-                background: radial-gradient(circle at top left,#1b2735,#090a0f);
-                color: #e0e0e0;
-                text-align: center;
-                padding: 40px;
-              }
-              .glass {
-                background: rgba(255,255,255,0.08);
-                border-radius: 20px;
-                box-shadow: 0 4px 40px rgba(0,0,0,0.3);
-                backdrop-filter: blur(12px);
-                padding: 30px;
-                margin: auto;
-                width: 85%;
-                max-width: 900px;
-              }
-              table {width:100%;border-collapse:collapse;margin-top:20px;}
-              th,td {padding:12px;border-bottom:1px solid rgba(255,255,255,0.1);}
-              tr:hover{background-color:rgba(255,255,255,0.05);}
-              a{color:#00eaff;text-decoration:none;}
-              a:hover{text-decoration:underline;}
-              input{background:#0d1117;border:1px solid #333;color:#fff;
-                     border-radius:8px;padding:8px;width:250px;margin-top:12px;}
-              footer{margin-top:30px;font-size:0.85em;color:#aaa;}
-            </style>
-          </head>
-          <body>
+          <html lang="en"><head><meta charset="utf-8"/>
+          <title>📦 WhispersCpp-Android Downloads</title>
+          <style>
+            body{font-family:'Inter',system-ui;background:radial-gradient(circle at top left,#1b2735,#090a0f);
+            color:#e0e0e0;text-align:center;padding:40px;}
+            .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 4px 40px rgba(0,0,0,0.3);
+            backdrop-filter:blur(12px);padding:30px;margin:auto;width:85%;max-width:900px;}
+            table{width:100%;border-collapse:collapse;margin-top:20px;}
+            th,td{padding:12px;border-bottom:1px solid rgba(255,255,255,0.1);}
+            tr:hover{background-color:rgba(255,255,255,0.05);}
+            a{color:#00eaff;text-decoration:none;}a:hover{text-decoration:underline;}
+            footer{margin-top:30px;font-size:0.85em;color:#aaa;}
+          </style></head><body>
             <div class="glass">
               <h1>📦 WhispersCpp-Android</h1>
               <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${BASE_URL}" width="100"></p>
@@ -287,10 +267,8 @@ jobs:
           fi
 
           cat >> gh-pages/downloads/index.html <<'HTML'
-              </table>
-              <footer>Generated automatically by CI/CD v9.6.4 Fallback-Stable</footer>
-            </div>
-          </body></html>
+              </table><footer>Generated automatically by CI/CD v9.6.5 Fallback-Stable</footer>
+            </div></body></html>
           HTML
 
       - uses: peaceiris/actions-gh-pages@v4
@@ -299,4 +277,4 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update Pages (v9.6.4 Fallback-Stable)"
+          commit_message: "Update Pages (v9.6.5 Fallback-Stable)"
