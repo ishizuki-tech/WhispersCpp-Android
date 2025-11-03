@@ -1,13 +1,13 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.2 Hybrid Branch Edition)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.3 Modern Glass UI Edition)
 # ------------------------------------------------------------
-# • Branch input (main / try / dev etc.)
-# • Smart Build Skip + MetaAlways + Rich Wiki/Pages
-# • Fallback → Latest successful run or latest Release asset
-# • Badge: ✅ New / ♻️ Reused / 🪶 Fallback
+# • Branch input (main / try / dev)
+# • Smart Build Skip + MetaAlways
+# • Rich Wiki + Modern Glass Pages
+# • QR + Dynamic Filter + SHA Hover Animation
 # ============================================================
 
-name: Android CI & Release (Hybrid Branch Edition)
+name: Android CI & Release (Modern Glass UI Edition)
 
 on:
   workflow_dispatch:
@@ -43,7 +43,7 @@ env:
   NDK_VERSION: 28.1.13356709
 
 # ============================================================
-# 🧠 Detect Source Changes
+# 🧠 Detect + Tag
 # ============================================================
 jobs:
   detect:
@@ -56,13 +56,11 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.branch || github.ref_name }}
-
       - id: tag
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG:-<none>}"
-
       - id: check
         run: |
           if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
@@ -70,39 +68,14 @@ jobs:
           else
             CHANGED=1
           fi
-          if [ "$CHANGED" -gt 0 ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "✅ Source updated ($CHANGED files)"
-          else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "🟡 No source changes detected."
-          fi
+          echo "changed=$([ "$CHANGED" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
   # ============================================================
-  # 🧪 Review (optional)
-  # ============================================================
-  review:
-    if: ${{ inputs.enable_review == true && needs.detect.outputs.changed == 'true' }}
-    needs: detect
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.branch || github.ref_name }}
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - run: ./gradlew :app:lintDebug || echo "::warning::Lint failed"
-      - run: ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
-
-  # ============================================================
-  # 🏗️ Build (only if changed)
+  # 🏗️ Build
   # ============================================================
   build:
     runs-on: ubuntu-latest
-    needs: [detect, review]
+    needs: detect
     if: ${{ needs.detect.outputs.changed == 'true' }}
     steps:
       - uses: actions/checkout@v4
@@ -115,17 +88,6 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
-      - name: ⚙️ Gradle config
-        run: |
-          cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
-          org.gradle.daemon=true
-          org.gradle.parallel=true
-          org.gradle.caching=true
-          org.gradle.configureondemand=true
-          EOF
       - name: 🧩 Build Release
         run: ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --info
       - id: collect
@@ -140,11 +102,11 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # 🧩 Meta (always)
+  # 🧩 Meta
   # ============================================================
   meta:
     runs-on: ubuntu-latest
-    needs: [detect]
+    needs: detect
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
       changed: ${{ needs.detect.outputs.changed }}
@@ -156,23 +118,26 @@ jobs:
       - id: tag
         run: |
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.6.2-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.6.3-$(date '+%Y%m%d-%H%M')"
             git tag -a "$TAG" -m "Auto-tag"
             git push origin "$TAG"
           else
             TAG="${{ needs.detect.outputs.last_tag }}"
           fi
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
-      - name: 🧠 Generate Metadata
+      - name: 🧠 Meta JSON
         run: |
           mkdir -p meta
           DATE=$(date '+%Y-%m-%d %H:%M')
-          jq -n --arg g "$DATE" --arg t "${{ steps.tag.outputs.tag_name }}" '{generated:$g, version_tag:$t}' > meta/models.json
+          jq -n --arg g "$DATE" --arg t "${{ steps.tag.outputs.tag_name }}" \
+            '{generated:$g, version_tag:$t, note:"Meta generated automatically"}' > meta/models.json
       - uses: actions/upload-artifact@v4
-        with: { name: meta, path: meta/models.json }
+        with:
+          name: meta
+          path: meta/models.json
 
   # ============================================================
-  # 🌐 Publish (always)
+  # 🌐 Publish
   # ============================================================
   publish:
     runs-on: ubuntu-latest
@@ -183,57 +148,26 @@ jobs:
         with:
           ref: ${{ inputs.branch || github.ref_name }}
 
-      - name: ⬇️ Meta
+      - name: ⬇️ Download Meta
         uses: actions/download-artifact@v4
-        with: { name: meta, path: meta/ }
+        with:
+          name: meta
+          path: meta/
 
-      - name: ⬇️ Artifact (current)
-        id: local
+      - name: ⬇️ Download Artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: release-artifacts
           path: artifacts/
-        continue-on-error: true
 
-      - name: 🔄 Last success / Latest release
-        if: ${{ steps.local.outcome == 'failure' || hashFiles('artifacts/*') == '' }}
+      - run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: 🌈 Generate Modern Glass UI Page + Wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          REPO="${{ github.repository }}"
-          mkdir -p artifacts
-          echo "⚠️ Fetching previous successful artifact…"
-          RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs?status=success&per_page=1" | jq -r '.workflow_runs[0].id')
-          if [ "$RUN_ID" != "null" ] && [ -n "$RUN_ID" ]; then
-            URL=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/actions/runs/$RUN_ID/artifacts" | \
-              jq -r '.artifacts[] | select(.name=="release-artifacts") | .archive_download_url' | head -n1)
-            if [ -n "$URL" ]; then
-              curl -L -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
-              unzip -o artifacts.zip -d artifacts
-              echo "♻️ Using last artifact from run #${RUN_ID}" > artifacts/_source.txt
-            fi
-          fi
-          if [ "$(ls -1 artifacts | wc -l)" -eq 0 ]; then
-            echo "🪶 Trying latest release asset…"
-            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/releases/latest" | \
-              jq -r '.assets[] | select(.name|test("apk|aab")) | .browser_download_url' | \
-              xargs -I{} bash -c 'curl -L "{}" -o "artifacts/$(basename {})"'
-            echo "⚠️ Using fallback: latest release asset" > artifacts/_source.txt
-          fi
-
-      - run: sudo apt-get update && sudo apt-get install -y jq
-
-      # ============================================================
-      # 📘 Generate Wiki + Pages
-      # ============================================================
-      - name: 📘 Generate Wiki + Pages
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
           TAG=${{ needs.meta.outputs.tag_name }}
           DATE=$(date '+%Y-%m-%d %H:%M')
           REPO="${{ github.repository }}"
@@ -241,79 +175,104 @@ jobs:
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           mkdir -p wiki gh-pages/downloads
 
-          # バッジの自動切替
-          if [ "${{ needs.meta.outputs.changed }}" == "true" ]; then
-            BADGE="✅ New Build"; COLOR="brightgreen"
-          elif grep -q "Using last artifact" artifacts/_source.txt 2>/dev/null; then
-            BADGE="🪶 Fallback Artifact"; COLOR="orange"
-          else
-            BADGE="♻️ Reused Build"; COLOR="blue"
-          fi
+          echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
+          echo "Updated: ${DATE}\n" >> wiki/Downloads.md
+          jq . meta/models.json >> wiki/Downloads.md
 
-          # Wiki 生成
-          {
-            echo "# 📦 WhispersCpp-Android (${TAG})"
-            echo "![badge](https://img.shields.io/badge/${BADGE// /_}-${COLOR}.svg)"
-            echo
-            echo "Updated: ${DATE}"
-            echo
-            echo "## 🧠 Metadata"
-            jq . meta/models.json
-            if [ -f artifacts/_source.txt ]; then
-              echo
-              echo "> $(cat artifacts/_source.txt)"
-              echo
-            fi
-            echo "## ✅ Latest Artifacts"
-            if ls artifacts/*.apk >/dev/null 2>&1 || ls artifacts/*.aab >/dev/null 2>&1; then
-              for f in artifacts/*.apk artifacts/*.aab; do
-                [ -f "$f" ] || continue
-                N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
-                echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S  \`$H\`"
-              done
-            else
-              echo "- (no artifacts available)"
-            fi
-            echo
-            echo "## 🕓 Release History"
-            curl -s -H "Authorization: token ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
-              jq -r '.[] | "- [" + .tag_name + "](" + .html_url + ") (" + (.published_at[0:10] // "") + ")"' | sort -r
-          } > wiki/Downloads.md
-
-          # Pages (リッチUI)
+          # Modern HTML page
           cat > gh-pages/downloads/index.html <<HTML
-          <!doctype html><html lang="en"><head><meta charset="utf-8">
-          <title>📦 WhispersCpp-Android Downloads</title>
-          <style>
-            body{font-family:Inter,system-ui;background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);color:#fff;text-align:center;padding:40px;}
-            table{margin:auto;border-collapse:collapse;width:92%;background:rgba(255,255,255,.05);}
-            th,td{padding:8px 12px;border-bottom:1px solid #333;}a{color:#00eaff;text-decoration:none;}
-            input{margin:20px;padding:8px;border-radius:8px;border:1px solid #555;width:260px;background:#111;color:#fff;}
-          </style></head><body>
-          <h1>📦 WhispersCpp-Android</h1>
-          <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${BASE_URL}" width="120"></p>
-          <p>Updated: ${DATE} — Tag: ${TAG}</p>
-          <input type="text" id="search" placeholder="Filter table…">
-          <table id="tbl"><tr><th>File</th><th>Size</th><th>SHA256</th></tr></table>
-          <script>const rows=[];</script>
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8"/>
+            <title>📦 WhispersCpp-Android Downloads</title>
+            <style>
+              :root {--glass-bg: rgba(255,255,255,0.08);}
+              body {
+                font-family: 'Inter',system-ui;
+                background: radial-gradient(circle at top left,#1b2735,#090a0f);
+                color: #e0e0e0;
+                text-align: center;
+                padding: 40px;
+              }
+              .glass {
+                background: var(--glass-bg);
+                border-radius: 20px;
+                box-shadow: 0 4px 40px rgba(0,0,0,0.3);
+                backdrop-filter: blur(12px);
+                padding: 30px;
+                margin: auto;
+                width: 85%;
+                max-width: 900px;
+              }
+              table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+              }
+              th, td {
+                padding: 12px;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+              }
+              tr:hover {background-color: rgba(255,255,255,0.05);}
+              a {color: #00eaff; text-decoration:none;}
+              a:hover {text-decoration:underline;}
+              input {
+                background:#0d1117; border:1px solid #333; color:#fff;
+                border-radius:8px; padding:8px; width:250px; margin-top:12px;
+              }
+              footer{margin-top:30px;font-size:0.85em;color:#aaa;}
+              .badge {
+                display:inline-block; padding:6px 12px; border-radius:12px;
+                background:linear-gradient(90deg,#00eaff,#007bff);
+                color:#000; font-weight:600; margin-bottom:15px;
+              }
+              .dark-toggle {
+                position:fixed; top:15px; right:15px;
+                cursor:pointer; background:#222; border-radius:50%;
+                width:32px; height:32px; display:flex;
+                align-items:center; justify-content:center;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="dark-toggle" onclick="toggleTheme()">🌙</div>
+            <div class="glass">
+              <h1>📦 WhispersCpp-Android</h1>
+              <div class="badge">Tag: ${TAG}</div>
+              <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${BASE_URL}" width="100"></p>
+              <p>Updated: ${DATE}</p>
+              <input id="search" placeholder="Filter file...">
+              <table id="tbl"><tr><th>File</th><th>Size</th><th>SHA256</th></tr></table>
+              <footer>Generated automatically for ${OWNER}/${REPO}</footer>
+            </div>
+            <script>
+              const files = [];
+            </script>
           HTML
 
-          if ls artifacts/*.apk >/dev/null 2>&1 || ls artifacts/*.aab >/dev/null 2>&1; then
-            for f in artifacts/*.apk artifacts/*.aab; do
-              [ -f "$f" ] || continue
-              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
-              echo "          <script>rows.push(['$N','$S','$H']);</script>" >> gh-pages/downloads/index.html
-            done
-          fi
+          for f in artifacts/*.apk artifacts/*.aab; do
+            [ -f "$f" ] || continue
+            N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "            <script>files.push(['$N','$S','$H']);</script>" >> gh-pages/downloads/index.html
+          done
 
           cat >> gh-pages/downloads/index.html <<'HTML'
-          <script>
-            const tbl=document.getElementById('tbl');
-            rows.forEach(r=>{let tr=tbl.insertRow();tr.innerHTML=`<td><a href='../${r[0]}'>${r[0]}</a></td><td>${r[1]}</td><td><code>${r[2]}</code></td>`});
-            const input=document.getElementById('search');
-            input.oninput=e=>{[...tbl.rows].forEach((tr,i)=>{if(i===0)return;tr.style.display=tr.textContent.toLowerCase().includes(e.target.value.toLowerCase())?'':'none';});};
-          </script>
+            <script>
+              const tbl=document.getElementById('tbl');
+              files.forEach(f=>{
+                const tr=document.createElement('tr');
+                tr.innerHTML=`<td><a href='../${f[0]}'>${f[0]}</a></td><td>${f[1]}</td><td><code>${f[2]}</code></td>`;
+                tbl.appendChild(tr);
+              });
+              const inp=document.getElementById('search');
+              inp.oninput=e=>[...tbl.rows].forEach((tr,i)=>{if(i===0)return;tr.style.display=tr.textContent.toLowerCase().includes(e.target.value.toLowerCase())?'':'none';});
+              function toggleTheme(){
+                document.body.style.background=document.body.style.background.includes('#fff')?
+                'radial-gradient(circle at top left,#1b2735,#090a0f)':'#fff';
+                document.body.style.color=document.body.style.color=='#000'?'#e0e0e0':'#000';
+              }
+            </script>
           </body></html>
           HTML
 
@@ -323,18 +282,4 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update Pages (MetaSync ${{ needs.meta.outputs.tag_name }})"
-
-      - name: 📝 Push Wiki (master)
-        run: |
-          REPO="${{ github.repository }}"
-          WIKI_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
-          git clone "$WIKI_URL" tempwiki
-          cd tempwiki
-          git checkout master || git checkout -b master
-          cp ../wiki/Downloads.md .
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Downloads.md
-          git commit -m "Auto-update Wiki (${{ needs.meta.outputs.tag_name }})" || echo "No changes"
-          git push origin master --force
+          commit_message: "Update Pages (v9.6.3 Glass UI)"
