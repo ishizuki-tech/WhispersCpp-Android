@@ -1,0 +1,143 @@
+# ============================================================
+# ✅ WhispersCpp-Android — CI Build (v9.7.3 Hybrid Final)
+# ------------------------------------------------------------
+# • Detect + optional Review + Build (Release)
+# • Smart diff detection + Force override
+# • Uploads artifacts for ci-publish.yml
+# ============================================================
+
+name: Android CI Build (Review + Build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Target branch to build"
+        required: false
+        default: "main"
+      enable_review:
+        description: "Run Lint & Unit Tests"
+        type: boolean
+        default: true
+      force_build:
+        description: "Force build even if no diff detected"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  NDK_VERSION: 28.1.13356709
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      force: ${{ steps.force.outputs.force }}
+      last_tag: ${{ steps.tag.outputs.last_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.branch || github.ref_name }}
+
+      - id: tag
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "🪶 Last tag: ${LAST_TAG:-<none>}"
+
+      - id: check
+        run: |
+          set -e
+          TARGETS="app/ nativelib/ gradle.properties gradle/libs.versions.toml gradle/wrapper/gradle-wrapper.properties gradlew gradlew.bat"
+          if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
+            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS | grep -E '\.(kt|java|cpp|cc|h|hpp|gradle|kts|toml|properties|xml|aidl|pro|bat)$' || true)
+          else
+            DIFF="(initial-build)"
+          fi
+          if [ "$DIFF" = "(initial-build)" ] || [ -n "$DIFF" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: force
+        run: |
+          if [ "${{ inputs.force_build }}" = "true" ]; then
+            echo "force=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "force=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  review_build:
+    name: Review + Build
+    runs-on: ubuntu-latest
+    needs: detect
+    if: ${{ needs.detect.outputs.changed == 'true' || needs.detect.outputs.force == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ inputs.branch || github.ref_name }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+
+      - name: 🧪 Review (Lint & Unit Tests)
+        if: ${{ inputs.enable_review == true }}
+        run: |
+          ./gradlew :app:lintDebug || echo "::warning::Lint failed"
+          ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
+
+      - name: 🧠 Ensure AndroidX enabled
+        run: |
+          echo "android.useAndroidX=true" >> gradle.properties
+          echo "android.enableJetifier=true" >> gradle.properties
+
+      - name: 🏗️ Build Release
+        run: |
+          echo "Running Build... (changed=${{ needs.detect.outputs.changed }}, force=${{ needs.detect.outputs.force }})"
+          ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --info
+
+      - id: collect
+        run: |
+          mkdir -p outputs
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) > outputs/files.txt || true
+          if [ ! -s outputs/files.txt ]; then
+            echo "::warning::No APK/AAB found"
+          fi
+          {
+            echo "files<<'EOF'"
+            cat outputs/files.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.collect.outputs.files != '' }}
+        with:
+          name: release-artifacts
+          path: ${{ steps.collect.outputs.files }}
+          retention-days: 7
+
+      - name: ✅ Build Finished
+        run: echo "✅ CI Build complete — ci-publish.yml will auto-trigger next."

@@ -1,0 +1,159 @@
+# ============================================================
+# ✅ WhispersCpp-Android — CI Publish (v9.7.3 Hybrid Final)
+# ------------------------------------------------------------
+# • Auto-triggered after ci-build.yml success
+# • Also runnable manually (fallback to latest build)
+# • Shared artifacts via API
+# ============================================================
+
+name: Android CI Publish (Meta + Pages + Wiki)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to publish (default: main)"
+        default: "main"
+      use_latest_build:
+        description: "Use latest successful build artifacts"
+        type: boolean
+        default: true
+  workflow_run:
+    workflows: ["Android CI Build (Review + Build)"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  meta_publish:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.branch || 'main' }}
+
+      - name: 🏷️ Tag new version
+        id: tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG="v9.7.3-$(date '+%Y%m%d-%H%M')"
+          git tag -a "$TAG" -m "Auto-tag (manual or linked publish)"
+          git push origin "$TAG"
+          echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: ⬇️ Retrieve build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p artifacts
+          REPO="${{ github.repository }}"
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            echo "🔗 Linked mode: Using artifacts from run $RUN_ID"
+          else
+            echo "🧭 Manual mode: Searching latest successful build run..."
+            RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs?status=success&per_page=10" \
+              | jq -r '.workflow_runs[] | select(.name=="Android CI Build (Review + Build)") | .id' | head -n1)
+          fi
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::warning::No valid build run found — skipping artifacts."
+            exit 0
+          fi
+
+          URL=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            | jq -r '.artifacts[] | select(.name=="release-artifacts") | .archive_download_url' | head -n1)
+
+          if [ -n "$URL" ]; then
+            echo "⬇️ Downloading from $URL"
+            curl -L -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
+            unzip -o artifacts.zip -d artifacts
+          else
+            echo "::warning::No 'release-artifacts' found in build run $RUN_ID"
+          fi
+
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: "WhispersCpp Release ${{ steps.tag.outputs.tag_name }}"
+          files: artifacts/*.apk,artifacts/*.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🌈 Generate Wiki + Pages (Glass UI)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG=${{ steps.tag.outputs.tag_name }}
+          DATE=$(date '+%Y-%m-%d %H:%M')
+          REPO="${{ github.repository }}"
+          OWNER="${{ github.repository_owner }}"
+          BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
+          mkdir -p wiki gh-pages/downloads
+
+          echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
+          echo "Updated: ${DATE}" >> wiki/Downloads.md
+          echo >> wiki/Downloads.md
+          shopt -s nullglob
+          for f in artifacts/*.apk artifacts/*.aab; do
+            N=$(basename "$f")
+            echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})" >> wiki/Downloads.md
+          done
+          shopt -u nullglob
+
+          cat > gh-pages/downloads/index.html <<HTML
+          <!doctype html>
+          <html lang="en"><head><meta charset="utf-8"/>
+          <title>📦 WhispersCpp-Android Downloads</title>
+          <style>body{font-family:system-ui;background:#111;color:#ddd;text-align:center;padding:40px}</style></head><body>
+          <h1>📦 WhispersCpp-Android</h1>
+          <p>Tag: ${TAG} — Updated: ${DATE}</p>
+          <ul>
+          HTML
+          for f in artifacts/*.apk artifacts/*.aab; do
+            [ -f "$f" ] || continue
+            N=$(basename "$f")
+            echo "<li><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></li>" >> gh-pages/downloads/index.html
+          done
+          cat >> gh-pages/downloads/index.html <<'HTML'
+          </ul><footer>Generated automatically by CI/CD v9.7.3 Hybrid Final</footer></body></html>
+          HTML
+
+      - name: 📘 Push Wiki
+        run: |
+          REPO="${{ github.repository }}"
+          ACTOR="${{ github.actor }}"
+          WIKI_URL="https://${ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
+          rm -rf wiki.push && cp -r wiki wiki.push
+          cd wiki.push
+          git init
+          git config user.name "${ACTOR}"
+          git config user.email "${ACTOR}@users.noreply.github.com"
+          git add Downloads.md
+          git commit -m "Auto-update Wiki (Hybrid Final)"
+          git branch -M master
+          git remote add origin "$WIKI_URL"
+          git push origin master --force
+
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: gh-pages/downloads
+          publish_branch: gh-pages
+          force_orphan: true
