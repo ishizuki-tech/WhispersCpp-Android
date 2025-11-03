@@ -1,12 +1,12 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.5.4 MetaAlways Edition)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.5.5 LastArtifact Fallback Edition)
 # ------------------------------------------------------------
 # • Build only when source changed
-# • Meta + Publish always run (even if Build skipped)
-# • Reuse last tag when no code changes
+# • Meta + Publish always run
+# • If build skipped → auto-fetch last successful artifact
 # ============================================================
 
-name: Android CI & Release (Smart BuildSkip + MetaAlways)
+name: Android CI & Release (Smart BuildSkip + MetaAlways + LastArtifact)
 
 on:
   workflow_dispatch:
@@ -152,7 +152,7 @@ jobs:
         name: 🏷️ Generate or reuse tag
         run: |
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.5.4-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.5.5-$(date '+%Y%m%d-%H%M')"
             echo "🆕 New tag: $TAG"
             git tag -a "$TAG" -m "Auto-tag for updated source"
             git push origin "$TAG"
@@ -184,17 +184,50 @@ jobs:
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: ⬇️ Download Meta
+        uses: actions/download-artifact@v4
         with:
           name: meta
           path: meta/
-      - uses: actions/download-artifact@v4
+
+      # ============================================================
+      # 🔄 Try local artifact → fallback to latest successful build
+      # ============================================================
+      - name: ⬇️ Download Build Artifacts (current run)
+        id: try_local
+        uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: release-artifacts
           path: artifacts/
-          continue-on-error: true
+
+      - name: 🔍 Fallback: get last successful artifact if missing
+        if: ${{ failure() || steps.try_local.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "⚠️ No current artifact found — fetching last successful one..."
+          REPO="${{ github.repository }}"
+          RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${REPO}/actions/runs?status=success&per_page=1" | jq -r '.workflow_runs[0].id')
+          if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+            echo "Found last successful run: $RUN_ID"
+            mkdir -p artifacts
+            curl -L -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/runs/$RUN_ID/artifacts" | \
+              jq -r '.artifacts[] | select(.name=="release-artifacts") | .archive_download_url' | \
+              xargs -I{} curl -L -o artifacts.zip -H "Authorization: Bearer ${GH_TOKEN}" "{}"
+            unzip -o artifacts.zip -d artifacts || echo "⚠️ No artifacts.zip found"
+          else
+            echo "::warning::No previous successful artifact found."
+          fi
+
       - run: sudo apt-get update && sudo apt-get install -y jq
 
+      # ============================================================
+      # 📘 Generate Wiki + Pages
+      # ============================================================
       - name: 📘 Generate Wiki + Pages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -210,6 +243,12 @@ jobs:
           echo "Updated: ${DATE}\n" >> wiki/Downloads.md
           echo "## 🧠 Metadata" >> wiki/Downloads.md
           jq . meta/models.json >> wiki/Downloads.md
+
+          echo "\n## ✅ Latest Artifacts" >> wiki/Downloads.md
+          find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) | sort | while read f; do
+            N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S  \`$H\`"
+          done
 
           echo "\n## 🕓 Release History" >> wiki/Downloads.md
           curl -s -H "Authorization: token ${GH_TOKEN}" \
