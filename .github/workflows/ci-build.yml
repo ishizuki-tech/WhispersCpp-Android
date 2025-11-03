@@ -1,9 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Build (v9.7.3 Hybrid Final)
+# ✅ WhispersCpp-Android — CI Build (v9.7.4 Hybrid MetaSync Final)
 # ------------------------------------------------------------
 # • Detect + optional Review + Build (Release)
 # • Smart diff detection + Force override
-# • Uploads artifacts for ci-publish.yml
+# • Uploads artifacts + meta for ci-publish.yml
 # ============================================================
 
 name: Android CI Build (Review + Build)
@@ -62,12 +62,16 @@ jobs:
       - id: check
         run: |
           set -e
-          TARGETS="app/ nativelib/ gradle.properties gradle/libs.versions.toml gradle/wrapper/gradle-wrapper.properties gradlew gradlew.bat"
+          TARGETS="app/ nativelib/ gradle.properties gradle/libs.versions.toml gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.jar gradlew gradlew.bat"
           if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
-            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS | grep -E '\.(kt|java|cpp|cc|h|hpp|gradle|kts|toml|properties|xml|aidl|pro|bat)$' || true)
+            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS | grep -E '\.(kt|java|cpp|cc|h|hpp|gradle|kts|toml|properties|xml|aidl|pro|bat|jar)$' || true)
           else
             DIFF="(initial-build)"
           fi
+
+          echo "🔍 Diff detected files:"
+          echo "$DIFF"
+
           if [ "$DIFF" = "(initial-build)" ] || [ -n "$DIFF" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
@@ -102,6 +106,7 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           ndk-version: ${{ env.NDK_VERSION }}
+          cache: true
 
       - name: 🧪 Review (Lint & Unit Tests)
         if: ${{ inputs.enable_review == true }}
@@ -132,6 +137,9 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # ------------------------------------------------------------
+      # 📦 Upload main release artifacts
+      # ------------------------------------------------------------
       - uses: actions/upload-artifact@v4
         if: ${{ steps.collect.outputs.files != '' }}
         with:
@@ -139,5 +147,32 @@ jobs:
           path: ${{ steps.collect.outputs.files }}
           retention-days: 7
 
+      # ------------------------------------------------------------
+      # 🧩 Upload meta artifact (for ci-publish.yml tag sync)
+      # ------------------------------------------------------------
+      - name: 📄 Generate meta/models.json
+        run: |
+          mkdir -p meta
+          TAG=${{ needs.detect.outputs.last_tag }}
+          echo "Creating meta/models.json with tag: ${TAG:-unreleased}"
+          cat > meta/models.json <<JSON
+          {
+            "version_tag": "${TAG:-unreleased}",
+            "generated": "$(date '+%Y-%m-%d %H:%M')",
+            "branch": "${{ inputs.branch || github.ref_name }}",
+            "force_build": "${{ inputs.force_build }}",
+            "review_enabled": "${{ inputs.enable_review }}"
+          }
+          JSON
+          cat meta/models.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meta
+          path: meta/
+          retention-days: 7
+
       - name: ✅ Build Finished
-        run: echo "✅ CI Build complete — ci-publish.yml will auto-trigger next."
+        run: |
+          echo "✅ CI Build complete."
+          echo "Auto-triggered ci-publish.yml will use meta/models.json and artifacts next."
