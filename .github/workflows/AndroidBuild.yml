@@ -1,13 +1,14 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.8 Fallback-Stable + Glass UI)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.7 Debug-Patched + Glass UI)
 # ------------------------------------------------------------
 # • Branch input (main / try / dev)
 # • Smart Build Skip (strict source diff) + MetaAlways
 # • Rich Wiki (QR + Release History 20件) + Modern Glass Pages
 # • ✅ Auto fallback when artifact missing
 # • ♻️ Use latest Release assets if needed
-# • 🧩 Detect Gradle/Wrapper updates precisely
+# • 🧩 Fix git identity + AndroidX auto-enable
 # • 🚫 Tag update ONLY when build ran
+# • 🛠 Review only when build is needed / Verify index.html / Safe fallbacks
 # ============================================================
 
 name: Android CI & Release (Fallback-Stable Glass UI)
@@ -69,50 +70,34 @@ jobs:
       - id: check
         run: |
           set -e
-          # ✅ Gradle構成やWrapper変更も厳密に検出対象へ
-          TARGETS="app/ nativelib/ .gitmodules CMakeLists.txt \
-                   gradle.properties gradle/libs.versions.toml \
-                   gradle/wrapper/gradle-wrapper.properties gradlew gradlew.bat"
+          # 9.6.7 基準（app/ と nativelib/ のみ）。9.6.8 の厳密化は別ブランチで昇格可。
+          TARGETS="app/ nativelib/"
           echo "🔍 Checking for changes in: $TARGETS"
 
           if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
-            DIFF_ALL=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS || true)
-
-            # サブモジュール（gitlink）更新検知
-            CHANGED_SUB=""
-            if echo "$DIFF_ALL" | grep -qE '^nativelib/whisper_core($|/)' ; then
-              CHANGED_SUB="yes"
-              echo "🧩 Submodule pointer changed: nativelib/whisper_core"
-            fi
-
-            # 拡張子・Gradle関連ファイルでフィルタ
-            DIFF_EXT=$(echo "$DIFF_ALL" | grep -E '\.(kt|java|ktx|cpp|cc|c|h|hpp|cmake|gradle|kts|xml|aidl|pro|toml|properties|bat)$' || true)
-
-            # gradlew本体の変更検出（拡張子なしのため別判定）
-            if echo "$DIFF_ALL" | grep -qE '(^|/)gradlew$'; then
-              DIFF_EXT="$DIFF_EXT"$'\ngradlew'
-            fi
-
-            if [ -n "$DIFF_EXT" ] || [ -n "$CHANGED_SUB" ]; then
-              echo "🧩 Changed files:"; echo "${DIFF_EXT:-<only submodule pointer changed>}"
-              echo "changed=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "✅ No source or build config changes detected; skipping build."
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-            fi
+            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS \
+                    | grep -E '\.(kt|java|ktx|cpp|cc|c|h|hpp|cmake|gradle|kts|xml|aidl|pro)$' || true)
           else
+            DIFF="(initial-build)"
+          fi
+
+          if [ -n "$DIFF" ] && [ "$DIFF" != "(initial-build)" ]; then
+            echo "🧩 Changed files:"; echo "$DIFF"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DIFF" = "(initial-build)" ]; then
             echo "🧩 Initial run without tag -> build"
             echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ No source changes detected; skipping build."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
           echo "📊 Done."
 
-  # ============================================================
-  # ✅ Review (Lint & Tests)
-  # ============================================================
   review:
     runs-on: ubuntu-latest
     needs: detect
-    if: ${{ inputs.enable_review == true }}
+    # 🔒 Review は「ビルドが必要なときだけ」
+    if: ${{ inputs.enable_review == true && needs.detect.outputs.changed == 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,15 +107,13 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
       - name: Lint & Unit tests (non-blocking)
         run: |
           ./gradlew :app:lintDebug || echo "::warning::Lint failed"
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
   # ============================================================
-  # 🏗️ Build
+  # 🏗️ Build (only if changed)
   # ============================================================
   build:
     runs-on: ubuntu-latest
@@ -147,10 +130,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-
       - uses: android-actions/setup-android@v3
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
 
       - name: 🧠 Ensure AndroidX enabled
         run: |
@@ -164,7 +144,7 @@ jobs:
         run: |
           set -e
           mkdir -p outputs
-          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt || true
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           if [ ! -s outputs/files.txt ]; then
             echo "::warning::No APK/AAB artifacts found."
           fi
@@ -179,11 +159,11 @@ jobs:
         with:
           name: release-artifacts
           path: ${{ steps.collect.outputs.files }}
-          if-no-files-found: warn
           retention-days: 7
+          if-no-files-found: warn
 
   # ============================================================
-  # 🧩 Meta + Tag
+  # 🧩 Meta (Tag only when build ran)
   # ============================================================
   meta:
     runs-on: ubuntu-latest
@@ -197,18 +177,17 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.branch || github.ref_name }}
 
-      - name: Install jq
+      - name: Install jq (for meta json)
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y jq
 
       - id: tag
         run: |
-          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.6.8-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.6.7-$(date '+%Y%m%d-%H%M')"
             git tag -a "$TAG" -m "Auto-tag (build changed)"
             git push origin "$TAG"
             echo "🪶 Tagged new version: $TAG"
@@ -232,13 +211,18 @@ jobs:
           path: meta/models.json
 
   # ============================================================
-  # 🌐 Publish (Release + Pages + Wiki)
+  # 🌐 Publish (Release + Pages + Wiki) with Fallback
   # ============================================================
   publish:
     runs-on: ubuntu-latest
     needs: [meta]
     if: ${{ inputs.create_release == true }}
     steps:
+      - name: 🔧 Ensure gh/jq/unzip installed
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gh jq unzip || true
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.branch || github.ref_name }}
@@ -262,7 +246,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          sudo apt-get update && sudo apt-get install -y jq unzip
           mkdir -p artifacts
           REPO="${{ github.repository }}"
 
@@ -315,56 +298,120 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           mkdir -p wiki gh-pages/downloads
-          echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
-          echo "Updated: ${DATE}" >> wiki/Downloads.md
-          echo >> wiki/Downloads.md
-          cat meta/models.json >> wiki/Downloads.md
-          echo >> wiki/Downloads.md
-          echo "## 🧩 Build Artifacts" >> wiki/Downloads.md
+
+          # ---------- Wiki ----------
+          {
+            echo "# 📦 WhispersCpp-Android (${TAG})"
+            echo "Updated: ${DATE}"
+            echo
+            cat meta/models.json
+            echo
+            echo "## 🧩 Build Artifacts"
+            if [ -f artifacts/_release_assets.tsv ]; then
+              echo "_Using latest release assets_"
+              while IFS=$'\t' read -r N S U; do
+                echo "- [$N]($U) — ${S} bytes"
+              done < artifacts/_release_assets.tsv
+            else
+              shopt -s nullglob
+              COUNT=0
+              for f in artifacts/*.apk artifacts/*.aab; do
+                [ -f "$f" ] || continue
+                N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+                echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/$N) — $S \`$H\`"
+                COUNT=$((COUNT+1))
+              done
+              if [ "$COUNT" -eq 0 ]; then
+                echo "- _No files yet — build artifacts not found_"
+              fi
+              shopt -u nullglob
+            fi
+            echo
+            echo "## 🕓 Release History"
+            echo "> Last 20 releases on GitHub"
+            curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/releases?per_page=20" \
+              | jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' || echo "- (History unavailable.)"
+            echo
+            echo "<div align=\"center\">"
+            echo "<img src=\"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${BASE_URL}\" alt=\"QR\" width=\"180\" height=\"180\"><br>"
+            echo "🔗 <a href=\"${BASE_URL}\">Open Glass UI Downloads Page</a>"
+            echo "</div>"
+          } > wiki/Downloads.md
+
+          # ---------- Pages (Glass UI) ----------
+          cat > gh-pages/downloads/index.html <<HTML
+          <!doctype html>
+          <html lang="en"><head><meta charset="utf-8"/>
+          <title>📦 WhispersCpp-Android Downloads</title>
+          <meta name="viewport" content="width=device-width,initial-scale=1"/>
+          <style>
+            body{font-family:'Inter',system-ui;background:radial-gradient(circle at top left,#1b2735,#090a0f);
+            color:#e0e0e0;text-align:center;padding:40px;margin:0}
+            .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 4px 40px rgba(0,0,0,0.3);
+            backdrop-filter:blur(12px);padding:30px;margin:40px auto;width:92%;max-width:960px;}
+            table{width:100%;border-collapse:collapse;margin-top:20px;}
+            th,td{padding:12px;border-bottom:1px solid rgba(255,255,255,0.1);}
+            tr:hover{background-color:rgba(255,255,255,0.05);}
+            a{color:#00eaff;text-decoration:none;}a:hover{text-decoration:underline;}
+            footer{margin-top:30px;font-size:0.85em;color:#aaa;}
+          </style></head><body>
+            <div class="glass">
+              <p><a href="../index.html" target=_self title="Seperate Page">Go to index</a></p>
+              <h1>📦 WhispersCpp-Android</h1>
+              <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${BASE_URL}" width="110" height="110" alt="QR"></p>
+              <p>Tag: ${TAG} &nbsp;•&nbsp; Updated: ${DATE}</p>
+              <table><tr><th>File</th><th>Size</th><th>SHA256</th></tr>
+          HTML
+
           if [ -f artifacts/_release_assets.tsv ]; then
-            echo "_Using latest release assets_" >> wiki/Downloads.md
             while IFS=$'\t' read -r N S U; do
-              echo "- [$N]($U) — ${S} bytes" >> wiki/Downloads.md
+              echo "<tr><td><a href=\"$U\">$N</a></td><td>${S}</td><td>—</td></tr>" >> gh-pages/downloads/index.html
             done < artifacts/_release_assets.tsv
           else
+            shopt -s nullglob
+            COUNT=0
             for f in artifacts/*.apk artifacts/*.aab; do
-              [ -f "$f" ] || continue
-              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
-              echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N}) — $S \`$H\`" >> wiki/Downloads.md
+              if [ -f "$f" ]; then
+                N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+                echo "<tr><td><a href=\"https://github.com/${REPO}/releases/download/${TAG}/${N}\">${N}</a></td><td>${S}</td><td><code>${H}</code></td></tr>" >> gh-pages/downloads/index.html
+                COUNT=$((COUNT+1))
+              fi
             done
+            if [ "$COUNT" -eq 0 ]; then
+              echo "<tr><td colspan=\"3\"><em>No files yet — build artifacts not found</em></td></tr>" >> gh-pages/downloads/index.html
+            fi
+            shopt -u nullglob
           fi
-          echo >> wiki/Downloads.md
-          echo "## 🕓 Release History" >> wiki/Downloads.md
-          echo "> Last 20 releases on GitHub" >> wiki/Downloads.md
-          curl -s -H "Authorization: token ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/releases?per_page=20" \
-            | jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' >> wiki/Downloads.md
-          echo >> wiki/Downloads.md
-          echo "<div align=\"center\">" >> wiki/Downloads.md
-          echo "<img src=\"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${BASE_URL}\" width=\"180\" height=\"180\"><br>" >> wiki/Downloads.md
-          echo "🔗 <a href=\"${BASE_URL}\">Open Glass UI Downloads Page</a>" >> wiki/Downloads.md
-          echo "</div>" >> wiki/Downloads.md
 
-      - name: 📘 Push Wiki (skip if wiki disabled)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          cat >> gh-pages/downloads/index.html <<'HTML'
+              </table>
+              <footer>Generated automatically by CI/CD v9.6.7 Debug-Patched</footer>
+            </div></body></html>
+          HTML
+
+      - name: ✅ Verify downloads page generated
+        run: |
+          echo "📁 ls -R gh-pages/downloads"
+          ls -R gh-pages/downloads || true
+          if [ ! -f gh-pages/downloads/index.html ]; then
+            echo "::error::downloads/index.html is missing. Page generation failed."
+            exit 1
+          fi
+
+      - name: 📘 Push Wiki
         run: |
           set -e
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
-          HAS_WIKI=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/${REPO}" | jq -r '.has_wiki')
-          if [ "$HAS_WIKI" != "true" ]; then
-            echo "::warning::Wiki is disabled. Skipping."
-            exit 0
-          fi
-          WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
+          WIKI_URL="https://${ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
           rm -rf wiki.push && cp -r wiki wiki.push
           cd wiki.push
           git init
           git config user.name "${ACTOR}"
           git config user.email "${ACTOR}@users.noreply.github.com"
           git add Downloads.md
-          git commit -m "Auto-update Wiki (v9.6.8)"
+          git commit -m "Auto-update Wiki (QR + artifacts + history v9.6.7 Debug-Patched)"
           git branch -M master
           git remote add origin "$WIKI_URL"
           git push origin master --force
@@ -375,4 +422,4 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update Pages (v9.6.8 Fallback-Stable)"
+          commit_message: "Update Pages (v9.6.7 Debug-Patched)"
