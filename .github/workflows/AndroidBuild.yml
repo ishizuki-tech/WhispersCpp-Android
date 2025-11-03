@@ -1,5 +1,5 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.5 Fallback-Stable + Glass UI)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.6 Fallback-Stable + Glass UI)
 # ------------------------------------------------------------
 # • Branch input (main / try / dev)
 # • Smart Build Skip + MetaAlways
@@ -7,6 +7,7 @@
 # • ✅ Auto fallback when artifact missing
 # • ♻️ Use latest Release assets if needed
 # • 🧩 Fix git identity + AndroidX auto-enable
+# • 🚫 Skip tag update if no build change
 # ============================================================
 
 name: Android CI & Release (Fallback-Stable Glass UI)
@@ -71,6 +72,7 @@ jobs:
             CHANGED=1
           fi
           echo "changed=$([ "$CHANGED" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "📊 Files changed: $CHANGED"
 
   # ============================================================
   # 🏗️ Build (only if changed)
@@ -124,18 +126,25 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ inputs.branch || github.ref_name }}
+
       - id: tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # ✅ Tag only when build actually ran
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.6.5-$(date '+%Y%m%d-%H%M')"
-            git tag -a "$TAG" -m "Auto-tag"
+            TAG="v9.6.6-$(date '+%Y%m%d-%H%M')"
+            git tag -a "$TAG" -m "Auto-tag (build changed)"
             git push origin "$TAG"
+            echo "🪶 Tagged new version: $TAG"
           else
             TAG="${{ needs.detect.outputs.last_tag }}"
+            echo "🪶 No code changes detected — keeping existing tag: $TAG"
           fi
+
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: 🧠 Meta JSON
         run: |
           mkdir -p meta
@@ -267,7 +276,7 @@ jobs:
           fi
 
           cat >> gh-pages/downloads/index.html <<'HTML'
-              </table><footer>Generated automatically by CI/CD v9.6.5 Fallback-Stable</footer>
+              </table><footer>Generated automatically by CI/CD v9.6.6 Fallback-Stable</footer>
             </div></body></html>
           HTML
 
@@ -277,4 +286,4 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update Pages (v9.6.5 Fallback-Stable)"
+          commit_message: "Update Pages (v9.6.6 Fallback-Stable)"
