@@ -1,9 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Publish (v9.7.3 Hybrid Final)
+# ✅ WhispersCpp-Android — CI Publish (v9.7.4 SafeShare)
 # ------------------------------------------------------------
-# • Auto-triggered after ci-build.yml success
-# • Also runnable manually (fallback to latest build)
-# • Shared artifacts via API
+# • Auto-triggered after ci-build.yml success (workflow_run)
+# • Also runnable manually (workflow_dispatch)
+# • Robust artifact fetch + guards + wiki check
 # ============================================================
 
 name: Android CI Publish (Meta + Pages + Wiki)
@@ -29,6 +29,9 @@ defaults:
   run:
     shell: bash
 
+env:
+  NDK_VERSION: 28.1.13356709 # for consistency with build logs (not used here)
+
 jobs:
   meta_publish:
     runs-on: ubuntu-latest
@@ -39,62 +42,109 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # workflow_run には inputs が無いので fallback を入れる
           ref: ${{ inputs.branch || 'main' }}
 
-      - name: 🏷️ Tag new version
+      - name: 🛠️ Install dependencies (jq/unzip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq unzip
+
+      - name: 🏷️ Compute safe tag (avoid collisions)
         id: tag
         run: |
-          git config user.name "github-actions[bot]"
+          set -e
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          TAG="v9.7.3-$(date '+%Y%m%d-%H%M')"
+
+          BASE="v9.7.4-$(date '+%Y%m%d-%H%M')"
+          TAG="$BASE"
+          n=0
+          # 既存タグと衝突しないように -r1, -r2 ... を付与
+          while git rev-parse "$TAG" >/dev/null 2>&1; do
+            n=$((n+1))
+            TAG="${BASE}-r${n}"
+          done
+
           git tag -a "$TAG" -m "Auto-tag (manual or linked publish)"
           git push origin "$TAG"
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "🪶 Tagged: $TAG"
 
-      - name: ⬇️ Retrieve build artifacts
+      # ============================================================
+      # 🔄 Artifact retrieval (linked or manual)
+      # ============================================================
+      - name: ⬇️ Retrieve build artifacts (safe fallback)
+        id: fetch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           mkdir -p artifacts
           REPO="${{ github.repository }}"
+          TARGET_BRANCH="${{ inputs.branch || 'main' }}"
 
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             RUN_ID="${{ github.event.workflow_run.id }}"
             echo "🔗 Linked mode: Using artifacts from run $RUN_ID"
           else
-            echo "🧭 Manual mode: Searching latest successful build run..."
+            echo "🧭 Manual mode: Searching latest successful build run on branch: ${TARGET_BRANCH}"
+            # ブランチ絞り込みで誤取得防止
             RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/actions/runs?status=success&per_page=10" \
+              "https://api.github.com/repos/${REPO}/actions/runs?status=success&branch=${TARGET_BRANCH}&per_page=15" \
               | jq -r '.workflow_runs[] | select(.name=="Android CI Build (Review + Build)") | .id' | head -n1)
           fi
 
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
             echo "::warning::No valid build run found — skipping artifacts."
+            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          echo "📦 Using build run ID: $RUN_ID"
           URL=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
             "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
             | jq -r '.artifacts[] | select(.name=="release-artifacts") | .archive_download_url' | head -n1)
 
-          if [ -n "$URL" ]; then
-            echo "⬇️ Downloading from $URL"
-            curl -L -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
-            unzip -o artifacts.zip -d artifacts
-          else
-            echo "::warning::No 'release-artifacts' found in build run $RUN_ID"
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
+            echo "::warning::No 'release-artifacts' found in run $RUN_ID"
+            echo "Available artifacts in the run:"
+            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" | jq -r '.artifacts[].name'
+            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-      - name: 🚀 Create GitHub Release
+          echo "⬇️ Downloading artifact…"
+          curl -L -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
+          unzip -o artifacts.zip -d artifacts
+          rm -f artifacts.zip
+
+          if compgen -G "artifacts/*.apk" >/dev/null || compgen -G "artifacts/*.aab" >/dev/null; then
+            echo "has_artifacts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::ZIP unpacked but no APK/AAB files present."
+            echo "has_artifacts=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ============================================================
+      # 🚀 Release (only when we actually have artifacts)
+      # ============================================================
+      - name: 🚀 Create/Update GitHub Release
+        if: ${{ steps.fetch.outputs.has_artifacts == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag_name }}
           name: "WhispersCpp Release ${{ steps.tag.outputs.tag_name }}"
-          files: artifacts/*.apk,artifacts/*.aab
+          files: |
+            artifacts/*.apk
+            artifacts/*.aab
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ============================================================
+      # 🌈 Generate Wiki + Pages (Glass UI)
+      # ============================================================
       - name: 🌈 Generate Wiki + Pages (Glass UI)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -107,51 +157,91 @@ jobs:
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           mkdir -p wiki gh-pages/downloads
 
-          echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
-          echo "Updated: ${DATE}" >> wiki/Downloads.md
-          echo >> wiki/Downloads.md
-          shopt -s nullglob
-          for f in artifacts/*.apk artifacts/*.aab; do
-            N=$(basename "$f")
-            echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})" >> wiki/Downloads.md
-          done
-          shopt -u nullglob
+          # ---------- Wiki ----------
+          {
+            echo "# 📦 WhispersCpp-Android (${TAG})"
+            echo "Updated: ${DATE}"
+            echo
+            echo "## 🧩 Build Artifacts"
+            if compgen -G "artifacts/*.apk" >/dev/null || compgen -G "artifacts/*.aab" >/dev/null; then
+              for f in artifacts/*.apk artifacts/*.aab; do
+                [ -f "$f" ] || continue
+                N=$(basename "$f")
+                echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})"
+              done
+            else
+              echo "_No artifacts attached for this tag (manual publish or artifact expired)._"
+            fi
+            echo
+            echo "## 🔗 Downloads Page"
+            echo "<div align=\"center\">"
+            echo "<img src=\"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${BASE_URL}\" width=\"180\" height=\"180\"><br>"
+            echo "🔗 <a href=\"${BASE_URL}\">Open Glass UI Downloads Page</a>"
+            echo "</div>"
+          } > wiki/Downloads.md
 
+          # ---------- Pages (Glass UI) ----------
           cat > gh-pages/downloads/index.html <<HTML
           <!doctype html>
           <html lang="en"><head><meta charset="utf-8"/>
           <title>📦 WhispersCpp-Android Downloads</title>
-          <style>body{font-family:system-ui;background:#111;color:#ddd;text-align:center;padding:40px}</style></head><body>
-          <h1>📦 WhispersCpp-Android</h1>
-          <p>Tag: ${TAG} — Updated: ${DATE}</p>
-          <ul>
-          HTML
-          for f in artifacts/*.apk artifacts/*.aab; do
-            [ -f "$f" ] || continue
-            N=$(basename "$f")
-            echo "<li><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></li>" >> gh-pages/downloads/index.html
-          done
-          cat >> gh-pages/downloads/index.html <<'HTML'
-          </ul><footer>Generated automatically by CI/CD v9.7.3 Hybrid Final</footer></body></html>
+          <meta name="viewport" content="width=device-width,initial-scale=1"/>
+          <style>
+            body{font-family:system-ui;background:#111;color:#ddd;text-align:center;padding:40px;margin:0}
+            .box{background:#1b1b1b;border:1px solid #2a2a2a;border-radius:14px;max-width:900px;margin:24px auto;padding:24px}
+            a{color:#7bdcff;text-decoration:none}a:hover{text-decoration:underline}
+            ul{list-style:none;padding:0}
+            li{margin:8px 0}
+            footer{margin-top:20px;color:#aaa}
+          </style></head><body>
+          <div class="box">
+            <h1>📦 WhispersCpp-Android</h1>
+            <p>Tag: ${TAG} — Updated: ${DATE}</p>
+            <ul>
           HTML
 
-      - name: 📘 Push Wiki
+          if compgen -G "artifacts/*.apk" >/dev/null || compgen -G "artifacts/*.aab" >/dev/null; then
+            for f in artifacts/*.apk artifacts/*.aab; do
+              [ -f "$f" ] || continue
+              N=$(basename "$f")
+              echo "<li><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></li>" >> gh-pages/downloads/index.html
+            done
+          else
+            echo "<li><em>No artifacts available for this tag.</em></li>" >> gh-pages/downloads/index.html
+          fi
+
+          cat >> gh-pages/downloads/index.html <<'HTML'
+            </ul>
+            <footer>Generated automatically by CI/CD v9.7.4 SafeShare</footer>
+          </div></body></html>
+          HTML
+
+      - name: 📘 Push Wiki (skip if wiki disabled)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
-          WIKI_URL="https://${ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
+          HAS_WIKI=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/${REPO}" | jq -r '.has_wiki')
+          if [ "$HAS_WIKI" != "true" ]; then
+            echo "::warning::Wiki is disabled. Skipping wiki push."
+            exit 0
+          fi
+          WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
           rm -rf wiki.push && cp -r wiki wiki.push
           cd wiki.push
           git init
           git config user.name "${ACTOR}"
           git config user.email "${ACTOR}@users.noreply.github.com"
           git add Downloads.md
-          git commit -m "Auto-update Wiki (Hybrid Final)"
+          git commit -m "Auto-update Wiki (v9.7.4 SafeShare)"
           git branch -M master
           git remote add origin "$WIKI_URL"
           git push origin master --force
 
-      - uses: peaceiris/actions-gh-pages@v4
+      - name: 🚀 Publish gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: gh-pages/downloads
