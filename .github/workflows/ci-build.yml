@@ -1,8 +1,9 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Build (v9.7.4 Hybrid MetaSync Final)
+# ✅ WhispersCpp-Android — CI Build (v9.7.5 MetaSync-DexSafe Final)
 # ------------------------------------------------------------
 # • Detect + optional Review + Build (Release)
 # • Smart diff detection + Force override
+# • Dex-safe build (heap limit, cache clean)
 # • Uploads artifacts + meta for ci-publish.yml
 # ============================================================
 
@@ -56,8 +57,11 @@ jobs:
       - id: tag
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG="v9.7.5-$(date '+%Y%m%d-%H%M')"
+          fi
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
-          echo "🪶 Last tag: ${LAST_TAG:-<none>}"
+          echo "🪶 Last tag: ${LAST_TAG}"
 
       - id: check
         run: |
@@ -68,10 +72,8 @@ jobs:
           else
             DIFF="(initial-build)"
           fi
-
           echo "🔍 Diff detected files:"
           echo "$DIFF"
-
           if [ "$DIFF" = "(initial-build)" ] || [ -n "$DIFF" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
@@ -92,6 +94,9 @@ jobs:
     needs: detect
     if: ${{ needs.detect.outputs.changed == 'true' || needs.detect.outputs.force == 'true' }}
     steps:
+      # ------------------------------------------------------------
+      # 📦 Checkout & Environment
+      # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -108,22 +113,48 @@ jobs:
           ndk-version: ${{ env.NDK_VERSION }}
           cache: true
 
+      # ------------------------------------------------------------
+      # ♻️ Clean cache to avoid Dex corruption (DexSafe)
+      # ------------------------------------------------------------
+      - name: ♻️ Clean Gradle caches (DexSafe)
+        run: |
+          echo "🧹 Cleaning Gradle caches..."
+          rm -rf ~/.gradle/caches/modules-2/files-2.1/androidx.compose* || true
+          rm -rf ~/.gradle/caches/8.* || true
+          ./gradlew clean --no-daemon
+
+      # ------------------------------------------------------------
+      # 🧪 Review (optional)
+      # ------------------------------------------------------------
       - name: 🧪 Review (Lint & Unit Tests)
         if: ${{ inputs.enable_review == true }}
         run: |
           ./gradlew :app:lintDebug || echo "::warning::Lint failed"
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
-      - name: 🧠 Ensure AndroidX enabled
+      # ------------------------------------------------------------
+      # 🧠 Ensure AndroidX + Dex options
+      # ------------------------------------------------------------
+      - name: 🧠 Ensure AndroidX + Dex setup
         run: |
           echo "android.useAndroidX=true" >> gradle.properties
           echo "android.enableJetifier=true" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx3g -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
+          echo "android.enableDexingArtifactTransform=false" >> gradle.properties
 
-      - name: 🏗️ Build Release
+      # ------------------------------------------------------------
+      # 🏗️ Build Release (DexSafe + Memory)
+      # ------------------------------------------------------------
+      - name: 🏗️ Build Release (DexSafe)
+        env:
+          GRADLE_OPTS: "-Xmx3G -Dorg.gradle.daemon=false"
         run: |
-          echo "Running Build... (changed=${{ needs.detect.outputs.changed }}, force=${{ needs.detect.outputs.force }})"
-          ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --info
+          echo "🏗️ Running Build... (changed=${{ needs.detect.outputs.changed }}, force=${{ needs.detect.outputs.force }})"
+          ./gradlew :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace --info
 
+      # ------------------------------------------------------------
+      # 📂 Collect build outputs
+      # ------------------------------------------------------------
       - id: collect
         run: |
           mkdir -p outputs
@@ -148,20 +179,23 @@ jobs:
           retention-days: 7
 
       # ------------------------------------------------------------
-      # 🧩 Upload meta artifact (for ci-publish.yml tag sync)
+      # 🧩 Generate meta/models.json (for ci-publish.yml)
       # ------------------------------------------------------------
       - name: 📄 Generate meta/models.json
         run: |
           mkdir -p meta
           TAG=${{ needs.detect.outputs.last_tag }}
-          echo "Creating meta/models.json with tag: ${TAG:-unreleased}"
+          DATE=$(date '+%Y-%m-%d %H:%M')
+          echo "Creating meta/models.json with tag: ${TAG}"
           cat > meta/models.json <<JSON
           {
-            "version_tag": "${TAG:-unreleased}",
-            "generated": "$(date '+%Y-%m-%d %H:%M')",
+            "version_tag": "${TAG}",
+            "generated": "${DATE}",
             "branch": "${{ inputs.branch || github.ref_name }}",
             "force_build": "${{ inputs.force_build }}",
-            "review_enabled": "${{ inputs.enable_review }}"
+            "review_enabled": "${{ inputs.enable_review }}",
+            "gradle_heap": "3G",
+            "dex_safe": true
           }
           JSON
           cat meta/models.json
@@ -175,4 +209,4 @@ jobs:
       - name: ✅ Build Finished
         run: |
           echo "✅ CI Build complete."
-          echo "Auto-triggered ci-publish.yml will use meta/models.json and artifacts next."
+          echo "ci-publish.yml will auto-trigger and use meta/models.json + artifacts next."
