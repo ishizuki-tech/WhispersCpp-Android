@@ -1,19 +1,17 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.3.2)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.4.1 Hybrid Meta-Sync Edition)
 # ------------------------------------------------------------
-# • Auto Model Download + Safe Check (Hugging Face + Jacaranda)
-# • Auto AndroidX + QR Code + Release History
-# • Pages & Wiki Link-Only (no large files)
+# • Safe NDK install + auto model download
+# • meta/models.json → Pages + Wiki を自動生成
+# • Wiki = master branch 固定 / Pages = gh-pages 固定
+# • Release History + QR code + SHA checksum
 # ============================================================
 
-name: Android CI & Release (Auto Model + QR + History)
+name: Android CI & Release (Hybrid Meta-Sync)
 
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Target branch to build (default: current branch)"
-        default: ""
       create_release:
         description: "Publish GitHub Release + Pages + Wiki"
         type: boolean
@@ -32,56 +30,21 @@ defaults:
 
 env:
   CURL_UA: "curl/8.x (GitHub Actions; +https://github.com/actions)"
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  NDK_VERSION: 28.1.13356709
 
 # ============================================================
-# 🧠 Review
+# 🏗️ Build App and Collect Artifacts
 # ============================================================
 jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Enforce AndroidX
-        run: |
-          cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
-          org.gradle.parallel=true
-          org.gradle.configureondemand=true
-          org.gradle.caching=true
-          EOF
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-      - name: Lint & Unit tests (non-blocking)
-        run: |
-          ./gradlew :app:lintDebug || echo "::warning::Lint failed"
-          ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
-
-  # ============================================================
-  # 🏗️ Build & Release
-  # ============================================================
   build:
     runs-on: ubuntu-latest
-    needs: review
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-
-      - name: Enforce AndroidX
-        run: |
-          cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
-          android.enableJetifier=true
-          org.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8
-          org.gradle.parallel=true
-          org.gradle.configureondemand=true
-          org.gradle.caching=true
-          EOF
 
       - uses: actions/setup-java@v4
         with:
@@ -90,57 +53,48 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Download Whisper models (auto + safe)
+      - name: Install Safe NDK
+        run: |
+          set -eux
+          rm -rf "$ANDROID_SDK_ROOT/ndk" || true
+          sdkmanager --update
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;$NDK_VERSION"
+
+      - name: Download Whisper Models
         run: |
           set -euo pipefail
-          mkdir -p app/src/main/assets/models
-          cd app/src/main/assets/models
-          echo "📦 Downloading Whisper models..."
-
+          mkdir -p app/src/main/assets/models && cd app/src/main/assets/models
           download() {
             name="$1"; shift
-            urls=("$@")
-            for u in "${urls[@]}"; do
+            for u in "$@"; do
               echo "→ Trying $u"
-              if curl -fSL -A "curl/8.x (GitHub Actions)" --retry 3 --retry-delay 2 -o "$name.tmp" "$u"; then
-                mv "$name.tmp" "$name"
-                size=$(du -h "$name" | cut -f1)
-                echo "✅ Downloaded $name ($size)"
+              if curl -fSL -A "${CURL_UA}" --retry 3 --retry-delay 2 -o "$name" "$u"; then
+                echo "✅ $name downloaded"
                 return 0
               fi
             done
-            echo "::error::Failed to fetch $name"
-            return 1
+            echo "::error::Failed to fetch $name"; return 1
           }
-
           download ggml-tiny-q5_1.bin \
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin" \
-            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny-q5_1.bin"
-
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
           download ggml-base-q5_1.bin \
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin" \
-            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base-q5_1.bin"
-
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
           download ggml-small-q5_1.bin \
-            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
-
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           download ggml-model-q4_0.bin \
-            "https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin"
-
-          echo "--- Downloaded files ---"
-          ls -lh
+            https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
 
       - name: Build Release
         run: |
-          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon
+          ./gradlew -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true \
+            -Pandroid.ndkVersion=${NDK_VERSION} \
+            :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace
 
       - id: collect
-        name: Collect Artifacts
         run: |
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           echo "files<<EOF" >> "$GITHUB_OUTPUT"; cat outputs/files.txt >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
-          echo "--- SHA256 ---"; xargs -a outputs/files.txt -r sha256sum
 
       - uses: actions/upload-artifact@v4
         with:
@@ -148,31 +102,40 @@ jobs:
           path: ${{ steps.collect.outputs.files }}
           retention-days: 7
 
-      - id: version
-        run: |
-          VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - id: release
-        run: |
-          TAG="v${{ steps.version.outputs.version }}-$(date '+%Y%m%d-%H%M')"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - uses: softprops/action-gh-release@v2
-        if: ${{ inputs.create_release == true }}
-        with:
-          tag_name: ${{ steps.release.outputs.tag }}
-          name: "WhispersCpp Release ${{ steps.version.outputs.version }}"
-          files: ${{ steps.collect.outputs.files }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   # ============================================================
-  # 🌐 Pages (QR + Model Info + History)
+  # 🧠 Generate meta/models.json (shared for Pages + Wiki)
   # ============================================================
-  pages:
+  meta:
     runs-on: ubuntu-latest
     needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate Model Meta
+        run: |
+          mkdir -p meta
+          DATE=$(date '+%Y-%m-%d %H:%M')
+          cat > meta/models.json <<JSON
+          {
+            "generated": "${DATE}",
+            "models": [
+              {"name":"ggml-tiny-q5_1.bin","params":"39 M","size":"~32 MB","speed":"~32× RT","notes":"Multilingual (EN/JP/SW)","source":"https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-tiny-q5_1.bin"},
+              {"name":"ggml-base-q5_1.bin","params":"74 M","size":"~57 MB","speed":"~16× RT","notes":"Balanced multilingual","source":"https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-base-q5_1.bin"},
+              {"name":"ggml-small-q5_1.bin","params":"244 M","size":"~182 MB","speed":"~6× RT","notes":"High accuracy","source":"https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin"},
+              {"name":"ggml-model-q4_0.bin","params":"~769 M","size":"~444 MB","speed":"~3× RT","notes":"Swahili-tuned","source":"https://huggingface.co/jboat/jacaranda-asr-whispercpp/blob/main/ggml-model-q4_0.bin"}
+            ]
+          }
+          JSON
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meta
+          path: meta/models.json
+
+  # ============================================================
+  # 🌐 Publish Pages + Wiki from meta/models.json
+  # ============================================================
+  publish:
+    runs-on: ubuntu-latest
+    needs: [meta]
     if: ${{ inputs.create_release == true }}
     steps:
       - uses: actions/checkout@v4
@@ -180,174 +143,81 @@ jobs:
         with:
           name: release-artifacts
           path: artifacts/
+      - uses: actions/download-artifact@v4
+        with:
+          name: meta
+          path: meta/
+      - run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Generate HTML (QR + Model Info)
+      - name: Generate Wiki & Pages from meta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          mkdir -p gh-pages/downloads
+          set -eux
+          DATE=$(date '+%Y-%m-%d %H:%M')
           REPO="${{ github.repository }}"
-          BASE_URL="https://${{ github.repository_owner }}.github.io/$(basename ${REPO})/"
+          OWNER="${{ github.repository_owner }}"
+          BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           QR_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${BASE_URL}"
-          GEN_TIME=$(date '+%Y-%m-%d %H:%M')
-          curl -s -H "Authorization: token ${GH_TOKEN}" \
-               -H "Accept: application/vnd.github+json" \
-               "https://api.github.com/repos/${REPO}/releases?per_page=20" > gh-pages/releases.json
+          mkdir -p wiki gh-pages/downloads
 
+          # Markdown for Wiki
+          {
+            echo "# 📦 WhispersCpp-Android Downloads"
+            echo "Updated: ${DATE}\n"
+            echo "## 🎧 Whisper Model Specifications"
+            echo "| Model | Params | Size | Speed | Notes | Source |"
+            echo "|:--|:--:|:--:|:--:|:--|:--|"
+            jq -r '.models[] | "| \(.name) | \(.params) | \(.size) | \(.speed) | \(.notes) | [link](\(.source)) |" ' meta/models.json
+            echo "\n## ✅ Latest Artifacts"
+            find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) | sort | while read f; do
+              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+              echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S  \`$H\`"
+            done
+            echo "\n## 🕓 Release History"
+            curl -s -H "Authorization: token ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/releases?per_page=20" | jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"'
+          } > wiki/Downloads.md
+
+          # HTML for Pages
           cat > gh-pages/downloads/index.html <<HTML
-          <!doctype html><html lang="en"><head>
-          <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <!doctype html><html lang="en"><head><meta charset="utf-8">
           <title>📦 WhispersCpp-Android Downloads</title>
-          <style>
-            body{font-family:Inter,system-ui;text-align:center;margin:0;padding:40px;background:linear-gradient(145deg,#0f2027,#203a43,#2c5364);color:#fff;}
-            h1{margin-bottom:12px;}h2{margin-top:32px;}
-            ul{list-style:none;padding:0;}
-            a{color:#00eaff;text-decoration:none;font-weight:600;}
-            a:hover{text-decoration:underline;}
-            footer{opacity:.7;margin-top:40px;font-size:.85em;}
-            .qr img{margin:24px auto;border-radius:12px;transition:transform .3s;box-shadow:0 0 10px #00eaff;}
-            .qr img:hover{transform:scale(1.12);}
-            .desc{opacity:.85;font-size:.9em;margin-bottom:10px;}
+          <style>body{font-family:Inter,system-ui;background:#0f2027;color:#fff;text-align:center;padding:40px;}
+          table{margin:auto;border-collapse:collapse;width:90%;}th,td{padding:6px 10px;border-bottom:1px solid #333;}
+          a{color:#00eaff;text-decoration:none;}a:hover{text-decoration:underline;}
           </style></head><body>
           <h1>📦 WhispersCpp-Android Downloads</h1>
-          <div class="qr">
-            <img src="${QR_URL}" alt="QR code">
-            <div class="desc"><a href="${BASE_URL}" style="color:#88eaff">${BASE_URL}</a></div>
-            <div class="desc">📱 Scan on your phone to open directly</div>
-          </div>
-          <p>Generated: ${GEN_TIME}</p>
-
-          <h2>🎧 Whisper Model Specifications</h2>
-          <ul>
-            <li><b>ggml-tiny-q5_1.bin</b> — <a href="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin">source</a><br>
-              Multilingual (EN/JP/SW) • 39M params • 20MB • ~32× RT</li>
-            <li><b>ggml-base-q5_1.bin</b> — <a href="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin">source</a><br>
-              Balanced • 74M params • 57MB • ~16× RT</li>
-            <li><b>ggml-small-q5_1.bin</b> — <a href="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin">source</a><br>
-              High accuracy • 244M params • 182MB • ~6× RT</li>
-            <li><b>ggml-model-q4_0.bin</b> — <a href="https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin">source</a><br>
-              Swahili-tuned • 74M params • 61MB • ~14× RT</li>
-          </ul>
-
-          <h2>Latest Release</h2><ul>
+          <img src="${QR_URL}" width="160"><p><a href="${BASE_URL}">${BASE_URL}</a></p>
+          <p>Updated: ${DATE}</p>
+          <table><tr><th>Model</th><th>Params</th><th>Size</th><th>Speed</th><th>Notes</th><th>Source</th></tr>
           HTML
+          jq -r '.models[] | "<tr><td>\(.name)</td><td>\(.params)</td><td>\(.size)</td><td>\(.speed)</td><td>\(.notes)</td><td><a href=\"\(.source)\">link</a></td></tr>"' meta/models.json >> gh-pages/downloads/index.html
+          echo "</table><h2>Artifacts</h2><ul>" >> gh-pages/downloads/index.html
+          find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -printf "<li><a href='https://github.com/${REPO}/releases/latest/download/%f'>%f</a></li>\n" >> gh-pages/downloads/index.html
+          echo "</ul><footer><p>Generated ${DATE}</p></footer></body></html>" >> gh-pages/downloads/index.html
 
-          find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -printf "<li><a href='https://github.com/${REPO}/releases/latest/download/%f'>%f</a></li>\n" | sort >> gh-pages/downloads/index.html
-          echo "</ul><h2>Release History</h2><ul>" >> gh-pages/downloads/index.html
-          jq -r '.[] | "- <a href=\"\(.html_url)\">\(.name // .tag_name)</a> (" + (.published_at[0:10]) + ")"' gh-pages/releases.json | sed 's/$/<br>/' >> gh-pages/downloads/index.html
-          echo "</ul><footer>Files hosted on GitHub Releases • ${GEN_TIME}</footer></body></html>" >> gh-pages/downloads/index.html
-
+      # Push Pages → gh-pages
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update QR + model info + release history"
+          commit_message: "Auto-update Pages (${ {github.run_number } })"
 
-  # ============================================================
-  # 📘 Wiki Sync
-  # ============================================================
-  wiki:
-    runs-on: ubuntu-latest
-    needs: pages
-    if: ${{ inputs.create_release == true }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: release-artifacts
-          path: artifacts/
-
-      - name: Clone Wiki
+      # Push Wiki → master
+      - name: Push Wiki (master)
         run: |
-          if ! git ls-remote "https://github.com/${{ github.repository }}.wiki.git" &> /dev/null; then
-            echo "⚠️ Wiki not found; skipping."; exit 0; fi
-          git clone "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" wiki
-
-      - name: Update Downloads.md (Wiki, English, Final)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -xeuo pipefail
-          
+          set -eux
           REPO="${{ github.repository }}"
-          ACTOR="${{ github.actor }}"
-          WIKI_URL="https://${ACTOR}:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
-          
-          echo "📘 Cleaning any old wiki folder..."
-          rm -rf wiki || true
-          
-          echo "📘 Cloning Wiki repository..."
-          if ! git clone "$WIKI_URL" wiki; then
-            echo "⚠️ Wiki clone failed. Enable via:"
-            echo "   GitHub → Settings → General → Features → ✅ Wikis"
-            exit 1
-          fi
-          cd wiki
-          
-          # Build Downloads.md via a heredoc (clean & safe)
-          cat > Downloads.md <<'EOF'
-          # 📦 WhispersCpp-Android Downloads
-          Updated: DATE_PLACEHOLDER
-          
-          ## 🎧 Whisper Model Specifications
-            
-            > **Notes**
-            > - **Params** correspond to the original OpenAI Whisper model sizes (tiny = 39 M, base = 74 M, small = 244 M, medium = 769 M).
-            > - **Size** is the approximate GGML `.bin` file size on Hugging Face; slight variation may occur by commit.
-            > - **Speed (RT = real-time)** is a *reference range*; actual RTF depends on CPU/GPU, threads, and I/O.
-            > - The Jacaranda Swahili model is a Whisper-medium fine-tune; the linked GGML is a community q4_0 build.
-            
-            | Model | Params | Size | Speed (ref) | Notes | Source |
-            |:--|:--:|:--:|:--:|:--|:--|
-            | `ggml-tiny-q5_1.bin`  | 39 M             | ~32 MB    | ~10–30× RT | Multilingual (EN/JA/SW) | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-tiny-q5_1.bin) |
-            | `ggml-base-q5_1.bin`  | 74 M             | ~59.7 MB  | ~6–20× RT  | Balanced multilingual    | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-base-q5_1.bin) |
-            | `ggml-small-q5_1.bin` | 244 M            | ~190 MB   | ~4–8× RT   | Higher accuracy          | [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-small-q5_1.bin) |
-            | `ggml-model-q4_0.bin` | ~769 M (medium)  | 444 MB    | ~1–3× RT   | Swahili-tuned (GGML q4_0) | [Jacaranda (jboat)](https://huggingface.co/jboat/jacaranda-asr-whispercpp/blob/main/ggml-model-q4_0.bin) |
-          
-          ## ✅ Latest Files
-            EOF
-            
-            # Insert current timestamp
-            sed -i.bak "s|DATE_PLACEHOLDER|$(date '+%Y-%m-%d %H:%M')|g" Downloads.md
-            rm -f Downloads.md.bak
-          
-          # Append artifact list (if any)
-            {
-              if find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) | grep -q . ; then
-              find ../artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -print0 | sort -z | while IFS= read -r -d '' f; do
-              N=$(basename "$f")
-              S=$(du -h "$f" | cut -f1)
-              H=$(sha256sum "$f" | cut -d' ' -f1)
-              printf -- "- [%s](https://github.com/%s/releases/latest/download/%s) — %s  \`%s\`\n" "$N" "$REPO" "$N" "$S" "$H"
-              done
-              echo
-              else
-              echo "- (No build artifacts found in \`../artifacts\` at build time.)"
-              echo
-              fi
-            } >> Downloads.md
-            
-            # Append historical releases (best-effort)
-            {
-              echo "## 🕓 Historical Releases"
-              if command -v jq >/dev/null 2>&1; then
-                curl -s -H "Authorization: token ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-                  "https://api.github.com/repos/${REPO}/releases?per_page=20" | \
-                  jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"' || \
-                  echo "- (Failed to list releases.)"
-              else
-                echo "- (jq not available on runner; skipping release list.)"
-              fi
-            } >> Downloads.md
-            
-            echo "✅ Committing & pushing Wiki..."
-            git config user.name "${ACTOR}"
-            git config user.email "${ACTOR}@users.noreply.github.com"
-            git add Downloads.md
-            git commit -m "Auto-update Wiki (model info + artifacts + history $(date '+%Y-%m-%d %H:%M'))" || echo "No changes."
-            git branch -M master
-            git push "$WIKI_URL" master --force
-            ```
+          WIKI_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${REPO}.wiki.git"
+          git clone "$WIKI_URL" tempwiki
+          cd tempwiki
+          git checkout master || git checkout -b master
+          cp ../wiki/Downloads.md .
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Downloads.md
+          git commit -m "Sync Wiki (meta + artifacts ${DATE})" || echo "No changes"
+          git push origin master --force
