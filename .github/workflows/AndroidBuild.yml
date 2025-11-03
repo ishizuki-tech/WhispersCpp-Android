@@ -1,13 +1,14 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.3 Modern Glass UI Edition)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.6.4 Fallback-Stable + Glass UI)
 # ------------------------------------------------------------
 # • Branch input (main / try / dev)
 # • Smart Build Skip + MetaAlways
 # • Rich Wiki + Modern Glass Pages
-# • QR + Dynamic Filter + SHA Hover Animation
+# • ✅ Auto fallback when artifact missing
+# • ♻️ Use latest Release assets if needed
 # ============================================================
 
-name: Android CI & Release (Modern Glass UI Edition)
+name: Android CI & Release (Fallback-Stable Glass UI)
 
 on:
   workflow_dispatch:
@@ -71,7 +72,7 @@ jobs:
           echo "changed=$([ "$CHANGED" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
   # ============================================================
-  # 🏗️ Build
+  # 🏗️ Build (only if changed)
   # ============================================================
   build:
     runs-on: ubuntu-latest
@@ -118,7 +119,7 @@ jobs:
       - id: tag
         run: |
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.6.3-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.6.4-$(date '+%Y%m%d-%H%M')"
             git tag -a "$TAG" -m "Auto-tag"
             git push origin "$TAG"
           else
@@ -137,7 +138,7 @@ jobs:
           path: meta/models.json
 
   # ============================================================
-  # 🌐 Publish
+  # 🌐 Publish (always safe)
   # ============================================================
   publish:
     runs-on: ubuntu-latest
@@ -154,12 +155,46 @@ jobs:
           name: meta
           path: meta/
 
-      - name: ⬇️ Download Artifacts
+      - name: ⬇️ Try download current artifacts
+        id: try_art
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           name: release-artifacts
           path: artifacts/
+
+      - name: ♻️ Fallback to latest successful artifacts or release assets
+        id: fallback
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p artifacts
+          REPO="${{ github.repository }}"
+          # fallback 1: last successful run
+          if [ -z "$(ls -A artifacts 2>/dev/null || true)" ]; then
+            echo "🪶 No current artifacts; fetching previous successful run..."
+            RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs?status=success&per_page=1" | jq -r '.workflow_runs[0].id')
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+              URL=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                "https://api.github.com/repos/${REPO}/actions/runs/$RUN_ID/artifacts" | \
+                jq -r '.artifacts[] | select(.name=="release-artifacts") | .archive_download_url' | head -n1)
+              if [ -n "$URL" ]; then
+                curl -L -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
+                unzip -o artifacts.zip -d artifacts
+                echo "♻️ Using last successful artifact from run #${RUN_ID}"
+              fi
+            fi
+          fi
+          # fallback 2: latest release assets
+          if [ -z "$(ls -A artifacts 2>/dev/null || true)" ]; then
+            echo "🪶 Still no artifacts; using latest release assets"
+            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/releases/latest" > release.json
+            jq -r '.assets[] | select(.name|test("\\.(apk|aab)$")) | [.name, (.size|tostring), .browser_download_url] | @tsv' release.json \
+              > artifacts/_release_assets.tsv
+          fi
 
       - run: sudo apt-get update && sudo apt-get install -y jq
 
@@ -178,8 +213,25 @@ jobs:
           echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
           echo "Updated: ${DATE}\n" >> wiki/Downloads.md
           jq . meta/models.json >> wiki/Downloads.md
+          echo "\n## 🧩 Build Artifacts\n" >> wiki/Downloads.md
 
-          # Modern HTML page
+          # Collect artifacts list
+          if [ -f artifacts/_release_assets.tsv ]; then
+            echo "♻️ Using latest release assets" >> wiki/Downloads.md
+            while IFS=$'\t' read -r N S U; do
+              echo "- [$N]($U) — ${S} bytes" >> wiki/Downloads.md
+            done < artifacts/_release_assets.tsv
+          else
+            for f in artifacts/*.apk artifacts/*.aab; do
+              [ -f "$f" ] || continue
+              N=$(basename "$f")
+              S=$(du -h "$f" | cut -f1)
+              H=$(sha256sum "$f" | cut -d' ' -f1)
+              echo "- [$N](https://github.com/${REPO}/releases/latest/download/$N) — $S \`$H\`" >> wiki/Downloads.md
+            done
+          fi
+
+          # Generate Glass UI HTML
           cat > gh-pages/downloads/index.html <<HTML
           <!doctype html>
           <html lang="en">
@@ -187,7 +239,6 @@ jobs:
             <meta charset="utf-8"/>
             <title>📦 WhispersCpp-Android Downloads</title>
             <style>
-              :root {--glass-bg: rgba(255,255,255,0.08);}
               body {
                 font-family: 'Inter',system-ui;
                 background: radial-gradient(circle at top left,#1b2735,#090a0f);
@@ -196,7 +247,7 @@ jobs:
                 padding: 40px;
               }
               .glass {
-                background: var(--glass-bg);
+                background: rgba(255,255,255,0.08);
                 border-radius: 20px;
                 box-shadow: 0 4px 40px rgba(0,0,0,0.3);
                 backdrop-filter: blur(12px);
@@ -205,74 +256,40 @@ jobs:
                 width: 85%;
                 max-width: 900px;
               }
-              table {
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 20px;
-              }
-              th, td {
-                padding: 12px;
-                border-bottom: 1px solid rgba(255,255,255,0.1);
-              }
-              tr:hover {background-color: rgba(255,255,255,0.05);}
-              a {color: #00eaff; text-decoration:none;}
-              a:hover {text-decoration:underline;}
-              input {
-                background:#0d1117; border:1px solid #333; color:#fff;
-                border-radius:8px; padding:8px; width:250px; margin-top:12px;
-              }
+              table {width:100%;border-collapse:collapse;margin-top:20px;}
+              th,td {padding:12px;border-bottom:1px solid rgba(255,255,255,0.1);}
+              tr:hover{background-color:rgba(255,255,255,0.05);}
+              a{color:#00eaff;text-decoration:none;}
+              a:hover{text-decoration:underline;}
+              input{background:#0d1117;border:1px solid #333;color:#fff;
+                     border-radius:8px;padding:8px;width:250px;margin-top:12px;}
               footer{margin-top:30px;font-size:0.85em;color:#aaa;}
-              .badge {
-                display:inline-block; padding:6px 12px; border-radius:12px;
-                background:linear-gradient(90deg,#00eaff,#007bff);
-                color:#000; font-weight:600; margin-bottom:15px;
-              }
-              .dark-toggle {
-                position:fixed; top:15px; right:15px;
-                cursor:pointer; background:#222; border-radius:50%;
-                width:32px; height:32px; display:flex;
-                align-items:center; justify-content:center;
-              }
             </style>
           </head>
           <body>
-            <div class="dark-toggle" onclick="toggleTheme()">🌙</div>
             <div class="glass">
               <h1>📦 WhispersCpp-Android</h1>
-              <div class="badge">Tag: ${TAG}</div>
               <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${BASE_URL}" width="100"></p>
               <p>Updated: ${DATE}</p>
-              <input id="search" placeholder="Filter file...">
-              <table id="tbl"><tr><th>File</th><th>Size</th><th>SHA256</th></tr></table>
-              <footer>Generated automatically for ${OWNER}/${REPO}</footer>
-            </div>
-            <script>
-              const files = [];
-            </script>
+              <table><tr><th>File</th><th>Size</th><th>SHA256</th></tr>
           HTML
 
-          for f in artifacts/*.apk artifacts/*.aab; do
-            [ -f "$f" ] || continue
-            N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
-            echo "            <script>files.push(['$N','$S','$H']);</script>" >> gh-pages/downloads/index.html
-          done
+          if [ -f artifacts/_release_assets.tsv ]; then
+            while IFS=$'\t' read -r N S U; do
+              echo "<tr><td><a href=\"$U\">$N</a></td><td>${S}</td><td>—</td></tr>" >> gh-pages/downloads/index.html
+            done < artifacts/_release_assets.tsv
+          else
+            for f in artifacts/*.apk artifacts/*.aab; do
+              [ -f "$f" ] || continue
+              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+              echo "<tr><td><a href=\"../$N\">$N</a></td><td>${S}</td><td><code>${H}</code></td></tr>" >> gh-pages/downloads/index.html
+            done
+          fi
 
           cat >> gh-pages/downloads/index.html <<'HTML'
-            <script>
-              const tbl=document.getElementById('tbl');
-              files.forEach(f=>{
-                const tr=document.createElement('tr');
-                tr.innerHTML=`<td><a href='../${f[0]}'>${f[0]}</a></td><td>${f[1]}</td><td><code>${f[2]}</code></td>`;
-                tbl.appendChild(tr);
-              });
-              const inp=document.getElementById('search');
-              inp.oninput=e=>[...tbl.rows].forEach((tr,i)=>{if(i===0)return;tr.style.display=tr.textContent.toLowerCase().includes(e.target.value.toLowerCase())?'':'none';});
-              function toggleTheme(){
-                document.body.style.background=document.body.style.background.includes('#fff')?
-                'radial-gradient(circle at top left,#1b2735,#090a0f)':'#fff';
-                document.body.style.color=document.body.style.color=='#000'?'#e0e0e0':'#000';
-              }
-            </script>
+              </table>
+              <footer>Generated automatically by CI/CD v9.6.4 Fallback-Stable</footer>
+            </div>
           </body></html>
           HTML
 
@@ -282,4 +299,4 @@ jobs:
           publish_dir: gh-pages/downloads
           publish_branch: gh-pages
           force_orphan: true
-          commit_message: "Update Pages (v9.6.3 Glass UI)"
+          commit_message: "Update Pages (v9.6.4 Fallback-Stable)"
