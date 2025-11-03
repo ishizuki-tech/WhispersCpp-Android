@@ -1,12 +1,12 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.5.3 Smart BuildSkip + Always Publish)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.5.4 MetaAlways Edition)
 # ------------------------------------------------------------
-# • Skips build when no source changes
-# • Always runs Meta + Publish (Wiki + Pages)
-# • Auto-tag new release only if changed
+# • Build only when source changed
+# • Meta + Publish always run (even if Build skipped)
+# • Reuse last tag when no code changes
 # ============================================================
 
-name: Android CI & Release (Smart BuildSkip + Always Publish)
+name: Android CI & Release (Smart BuildSkip + MetaAlways)
 
 on:
   workflow_dispatch:
@@ -50,14 +50,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - id: tag
         name: 🔖 Get last release tag
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG:-<none>}"
+
       - id: check
-        name: 🔍 Detect source code changes
+        name: 🔍 Detect source changes
         run: |
           if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
             CHANGED=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD app/ nativelib/ | wc -l)
@@ -68,12 +70,12 @@ jobs:
             echo "✅ Source updated (${CHANGED} files changed)"
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "🟡 No source updates — skipping Build, but will update Wiki/Pages"
+            echo "🟡 No source updates — skipping Build, continuing Meta/Publish"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ============================================================
-  # 🧪 Optional Review
+  # 🧪 Review (optional)
   # ============================================================
   review:
     if: ${{ inputs.enable_review == true && needs.detect.outputs.changed == 'true' }}
@@ -138,7 +140,8 @@ jobs:
   # ============================================================
   meta:
     runs-on: ubuntu-latest
-    needs: [detect, build]
+    needs: [detect]
+    if: ${{ always() }}
     outputs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
     steps:
@@ -149,15 +152,16 @@ jobs:
         name: 🏷️ Generate or reuse tag
         run: |
           if [ "${{ needs.detect.outputs.changed }}" == "true" ]; then
-            TAG="v9.5.3-$(date '+%Y%m%d-%H%M')"
+            TAG="v9.5.4-$(date '+%Y%m%d-%H%M')"
             echo "🆕 New tag: $TAG"
             git tag -a "$TAG" -m "Auto-tag for updated source"
             git push origin "$TAG"
           else
             TAG="${{ needs.detect.outputs.last_tag }}"
-            echo "♻️ Reusing existing tag: $TAG"
+            echo "♻️ Reusing tag: $TAG"
           fi
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: 🧠 Generate Metadata
         run: |
           mkdir -p meta
@@ -204,7 +208,6 @@ jobs:
 
           echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
           echo "Updated: ${DATE}\n" >> wiki/Downloads.md
-
           echo "## 🧠 Metadata" >> wiki/Downloads.md
           jq . meta/models.json >> wiki/Downloads.md
 
