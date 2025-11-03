@@ -1,9 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.4.3 Hybrid Meta-Sync + ReviewToggle + Debug)
+# ✅ WhispersCpp-Android — CI/CD (Final Stable v9.4.4 Hybrid Meta-Sync + ReviewToggle + Debug)
 # ------------------------------------------------------------
 # • Safe NDK install + Auto Model Download
-# • meta/models.json → Pages + Wiki (master)
+# • meta/models.json → Pages + Wiki(master)
 # • workflow_dispatch: Review(Lint/Test) toggle
+# • Fixed: dynamic `needs` evaluation bug (always starts)
 # • Improved Gradle memory (-Xmx4g / 1GB MetaSpace)
 # • Enhanced debug logs + graceful fail
 # ============================================================
@@ -39,16 +40,15 @@ env:
   ANDROID_HOME: /usr/local/lib/android/sdk
   NDK_VERSION: 28.1.13356709
 
-# ============================================================
-# 🧠 Review (optional)
-# ============================================================
 jobs:
+  # ============================================================
+  # 🧠 Review (optional)
+  # ============================================================
   review:
     if: ${{ inputs.enable_review == true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Configure Gradle memory and AndroidX
         run: |
           cat > gradle.properties <<'EOF'
@@ -60,12 +60,10 @@ jobs:
           org.gradle.caching=true
           org.gradle.configureondemand=true
           EOF
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-
       - name: Run Lint & Unit Tests
         run: |
           set +e
@@ -74,25 +72,23 @@ jobs:
           echo "✅ Review stage complete"
 
   # ============================================================
-  # 🏗️ Build (depends on review only if enabled)
+  # 🏗️ Build (always starts, waits if review enabled)
   # ============================================================
   build:
     runs-on: ubuntu-latest
-    needs: ${{ inputs.enable_review && 'review' || '' }}
+    needs: [review]
+    if: ${{ always() || inputs.enable_review == false }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-
       - uses: android-actions/setup-android@v3
-
       - name: Configure Gradle (memory safe)
         run: |
           cat > gradle.properties <<'EOF'
@@ -104,7 +100,6 @@ jobs:
           org.gradle.caching=true
           org.gradle.configureondemand=true
           EOF
-
       - name: Install Safe NDK
         run: |
           set -eux
@@ -112,7 +107,6 @@ jobs:
           sdkmanager --update
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;$NDK_VERSION"
           test -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" || (echo "::error::NDK install failed" && exit 1)
-
       - name: Download Whisper Models
         run: |
           set -euo pipefail
@@ -133,7 +127,6 @@ jobs:
           download ggml-base-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
           download ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           download ggml-model-q4_0.bin https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin
-
       - name: Build Release (memory-safe)
         run: |
           ./gradlew \
@@ -141,14 +134,12 @@ jobs:
             -Pandroid.ndkVersion=${NDK_VERSION} \
             :app:assembleRelease :app:bundleRelease \
             --no-daemon --stacktrace --info
-
       - id: collect
         run: |
           mkdir -p outputs
           find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           echo "files<<EOF" >> "$GITHUB_OUTPUT"; cat outputs/files.txt >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
           echo "✅ Collected $(wc -l < outputs/files.txt) artifact(s)"
-
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
@@ -202,7 +193,6 @@ jobs:
           name: meta
           path: meta/
       - run: sudo apt-get update && sudo apt-get install -y jq
-
       - name: Generate Wiki + Pages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -214,7 +204,6 @@ jobs:
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           QR_URL="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${BASE_URL}"
           mkdir -p wiki gh-pages/downloads
-
           echo "📘 Building Wiki (Markdown)..."
           {
             echo "# 📦 WhispersCpp-Android Downloads"
@@ -232,7 +221,6 @@ jobs:
             curl -s -H "Authorization: token ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/releases?per_page=20" | jq -r '.[] | "- [" + (.name // .tag_name) + "](" + .html_url + ") (" + (.published_at[0:10]) + ")"'
           } > wiki/Downloads.md
-
           echo "🌐 Building Pages (HTML)..."
           cat > gh-pages/downloads/index.html <<HTML
           <!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -250,7 +238,6 @@ jobs:
           echo "</table><h2>Artifacts</h2><ul>" >> gh-pages/downloads/index.html
           find artifacts -type f \( -name "*.apk" -o -name "*.aab" \) -printf "<li><a href='https://github.com/${REPO}/releases/latest/download/%f'>%f</a></li>\n" >> gh-pages/downloads/index.html
           echo "</ul><footer><p>Generated ${DATE}</p></footer></body></html>" >> gh-pages/downloads/index.html
-
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -258,7 +245,6 @@ jobs:
           publish_branch: gh-pages
           force_orphan: true
           commit_message: "Update Pages (MetaSync)"
-
       - name: Push Wiki (master)
         run: |
           set -eux
