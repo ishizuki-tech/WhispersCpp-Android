@@ -1,14 +1,14 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Build (v9.7.8 MetaSync-DexFull + CacheSafe Final)
+# ✅ WhispersCpp-Android — CI/CD Build (v9.9.0 MetaSync + AutoRelease Final)
 # ------------------------------------------------------------
-# • AGP 8.13.0 + Gradle 8.10 対応
-# • Diff 検出 + Review + Release Build
-# • Gradle + NDK キャッシュ最適化
-# • Dex safe build (Heap limit + 部分Clean)
-# • Safe multiline outputs (EOF error 防止)
+# • Detect → Review → Build → Release
+# • Whisper models auto-download
+# • Gradle + NDK cache optimization
+# • DexSafe clean + Heap tuning
+# • Safe outputs & meta generation
 # ============================================================
 
-name: Android CI Build (Review + Build)
+name: Android CI Build (Detect + Review + Build + Release)
 
 on:
   workflow_dispatch:
@@ -18,7 +18,11 @@ on:
         required: false
         default: "main"
       enable_review:
-        description: "Run Lint & Unit Tests"
+        description: "Run Lint & Unit Tests before build"
+        type: boolean
+        default: true
+      create_release:
+        description: "Publish GitHub Release after build"
         type: boolean
         default: true
       force_build:
@@ -59,7 +63,7 @@ jobs:
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
-            LAST_TAG="v9.7.8-$(date '+%Y%m%d-%H%M')"
+            LAST_TAG="v9.9.0-$(date '+%Y%m%d-%H%M')"
           fi
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG}"
@@ -67,14 +71,14 @@ jobs:
       - id: check
         run: |
           set -e
-          TARGETS="app/ nativelib/ gradle.properties gradle/libs.versions.toml gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.jar gradlew gradlew.bat"
-          if [ -n "${{ steps.tag.outputs.last_tag }}" ]; then
-            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS | grep -E '\.(kt|java|cpp|cc|h|hpp|gradle|kts|toml|properties|xml|aidl|pro|bat|jar)$' || true)
+          TARGETS="app/ nativelib/ gradle.properties gradle/libs.versions.toml gradle/wrapper/"
+          if git rev-parse "${{ steps.tag.outputs.last_tag }}" >/dev/null 2>&1; then
+            DIFF=$(git diff --name-only ${{ steps.tag.outputs.last_tag }} HEAD -- $TARGETS \
+              | grep -E '\.(kt|java|cpp|cc|h|hpp|gradle|kts|toml|properties|xml|aidl|pro|bat|jar)$' || true)
           else
             DIFF="(initial-build)"
           fi
-          echo "🔍 Diff detected files:"
-          echo "$DIFF"
+          echo "🔍 Diff detected files:"; echo "$DIFF"
           if [ "$DIFF" = "(initial-build)" ] || [ -n "$DIFF" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
@@ -89,14 +93,14 @@ jobs:
             echo "force=false" >> "$GITHUB_OUTPUT"
           fi
 
-  review_build:
-    name: Review + Build
+  build:
+    name: Review + Build + Release
     runs-on: ubuntu-latest
     needs: detect
     if: ${{ needs.detect.outputs.changed == 'true' || needs.detect.outputs.force == 'true' }}
     steps:
       # ------------------------------------------------------------
-      # 📦 Environment Setup
+      # 📦 Checkout + Environment
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
@@ -115,48 +119,91 @@ jobs:
           cache: true
 
       # ------------------------------------------------------------
-      # 💾 Gradle cache restore
+      # 💾 Gradle cache
       # ------------------------------------------------------------
-      - name: 💾 Restore Gradle caches
-        id: gradle-cache
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             app/.cxx
             .gradle
-          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'gradle.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml','gradle.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
 
       # ------------------------------------------------------------
-      # ♻️ Clean Dex transform layers only
+      # ♻️ Clean Dex transform layers
       # ------------------------------------------------------------
       - name: ♻️ Clean Gradle transforms (DexSafe)
         run: |
-          echo "🧹 Cleaning only Dex transform layers..."
+          echo "🧹 Cleaning Dex transform cache..."
           rm -rf ~/.gradle/caches/transforms-* ~/.gradle/caches/jars-* || true
           ./gradlew clean --no-daemon
 
       # ------------------------------------------------------------
       # 🧪 Review (optional)
       # ------------------------------------------------------------
-      - name: 🧪 Review (Lint & Unit Tests)
+      - name: 🧪 Run Lint & Unit Tests
         if: ${{ inputs.enable_review == true }}
         run: |
           ./gradlew :app:lintDebug || echo "::warning::Lint failed"
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
       # ------------------------------------------------------------
-      # 🧠 AndroidX + Dex options
+      # 🧠 Gradle properties setup
       # ------------------------------------------------------------
-      - name: 🧠 Ensure AndroidX + Dex setup
+      - name: 🧠 Enforce AndroidX + Dex Options
         run: |
-          echo "android.useAndroidX=true" >> gradle.properties
-          echo "android.enableJetifier=true" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx3g -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
-          echo "android.useFullClasspathForDexingTransform=true" >> gradle.properties
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx3g -XX:+HeapDumpOnOutOfMemoryError
+          android.useFullClasspathForDexingTransform=true
+          org.gradle.parallel=true
+          org.gradle.caching=true
+          EOF
+
+      # ------------------------------------------------------------
+      # 🎧 Download Whisper Models
+      # ------------------------------------------------------------
+      - name: 🎧 Download Whisper models (auto + safe)
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/assets/models
+          cd app/src/main/assets/models
+          echo "📦 Downloading Whisper models..."
+
+          download() {
+            name="$1"; shift
+            urls=("$@")
+            for u in "${urls[@]}"; do
+              echo "→ Trying $u"
+              if curl -fSL -A "curl/8.x (GitHub Actions)" --retry 3 --retry-delay 2 -o "$name.tmp" "$u"; then
+                mv "$name.tmp" "$name"
+                size=$(du -h "$name" | cut -f1)
+                echo "✅ $name ($size)"
+                return 0
+              fi
+            done
+            echo "::error::Failed to fetch $name"
+            return 1
+          }
+
+          download ggml-tiny-q5_1.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin" \
+            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-tiny-q5_1.bin"
+
+          download ggml-base-q5_1.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin" \
+            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/ggml-base-q5_1.bin"
+
+          download ggml-small-q5_1.bin \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
+
+          download ggml-model-q4_0.bin \
+            "https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin"
+
+          echo "--- Downloaded files ---"; ls -lh
 
       # ------------------------------------------------------------
       # 🏗️ Build Release
@@ -165,39 +212,33 @@ jobs:
         env:
           GRADLE_OPTS: "-Xmx3G -Dorg.gradle.daemon=false"
         run: |
-          echo "🏗️ Running Build... (changed=${{ needs.detect.outputs.changed }}, force=${{ needs.detect.outputs.force }})"
-          ./gradlew :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace --info
+          echo "🏗️ Running build..."
+          ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon --info
 
       # ------------------------------------------------------------
-      # 📂 Collect build outputs (EOF safe)
+      # 📂 Collect build outputs
       # ------------------------------------------------------------
       - id: collect
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p outputs
-          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt || true
-
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt
           if [ ! -s outputs/files.txt ]; then
             echo "::warning::No APK/AAB found"
-            echo "files=" >> "$GITHUB_OUTPUT"
           else
-            echo "📦 Found build outputs:"
-            cat outputs/files.txt
-            {
-              echo "files<<EOF"
-              cat outputs/files.txt
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
+            echo "📦 Found artifacts:"; cat outputs/files.txt
+            xargs -a outputs/files.txt -r sha256sum
           fi
 
       # ------------------------------------------------------------
-      # 📦 Upload release artifacts
+      # 📤 Upload artifacts
       # ------------------------------------------------------------
       - uses: actions/upload-artifact@v4
-        if: ${{ steps.collect.outputs.files != '' }}
         with:
           name: release-artifacts
-          path: ${{ steps.collect.outputs.files }}
+          path: |
+            app/build/outputs/**/*.apk
+            app/build/outputs/**/*.aab
           retention-days: 7
 
       # ------------------------------------------------------------
@@ -213,10 +254,9 @@ jobs:
             "version_tag": "${TAG}",
             "generated": "${DATE}",
             "branch": "${{ inputs.branch || github.ref_name }}",
-            "force_build": "${{ inputs.force_build }}",
             "review_enabled": "${{ inputs.enable_review }}",
-            "gradle_heap": "3G",
-            "dex_full_classpath": true,
+            "force_build": "${{ inputs.force_build }}",
+            "heap": "3G",
             "cache_enabled": true
           }
           JSON
@@ -228,7 +268,32 @@ jobs:
           path: meta/
           retention-days: 7
 
+      # ------------------------------------------------------------
+      # 🪶 Version & Tag
+      # ------------------------------------------------------------
+      - id: version
+        run: |
+          VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          TAG="v${VERSION}-$(date '+%Y%m%d-%H%M')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "🪶 Tag prepared: $TAG"
+
+      # ------------------------------------------------------------
+      # 🚀 GitHub Release
+      # ------------------------------------------------------------
+      - uses: softprops/action-gh-release@v2
+        if: ${{ inputs.create_release == true }}
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "WhispersCpp Release ${{ steps.version.outputs.version }}"
+          files: |
+            app/build/outputs/**/*.apk
+            app/build/outputs/**/*.aab
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: ✅ Build Finished
         run: |
-          echo "✅ CI Build complete."
-          echo "ci-publish.yml will auto-trigger with artifacts + meta/models.json."
+          echo "✅ WhispersCpp-Android build complete."
+          echo "Artifacts and meta uploaded successfully."
