@@ -1,10 +1,11 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Publish (v9.9.9 AutoRelease + SafeHTML Final)
+# ✅ WhispersCpp-Android — CI Publish (v9.9.10 Full Stable)
 # ------------------------------------------------------------
-# • Auto detects the latest published GitHub release (fallback if meta not found)
+# • Auto detects latest published GitHub release (fallback if meta not found)
 # • Always updates Wiki + GitHub Pages (even if artifacts are empty)
-# • SafeHTML output — YAML-safe heredoc, placeholder substitution
-# • Fully validated: no YAML or Bash syntax errors
+# • SafeHTML output (YAML-safe heredoc, placeholder substitution)
+# • Wiki branch auto-detect (master/main both supported)
+# • Fully validated: no YAML/Bash syntax errors
 # ============================================================
 
 name: Android CI Publish (Meta + Pages + Wiki)
@@ -50,10 +51,10 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y jq unzip curl
+          sudo apt-get install -y jq unzip curl wget
 
       # ------------------------------------------------------------
-      # 🔎 Resolve workflow_run info (manual fallback)
+      # 🔎 Resolve workflow_run info
       # ------------------------------------------------------------
       - name: 🔎 Resolve workflow run
         id: resolve
@@ -62,13 +63,13 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
             echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
-            echo "✅ Using workflow_run on branch: ${{ github.event.workflow_run.head_branch }}"
+            echo "✅ Using workflow_run from branch: ${{ github.event.workflow_run.head_branch }}"
           else
             echo "🧭 Manual dispatch — no linked run_id."
           fi
 
       # ------------------------------------------------------------
-      # 🧠 Detect version tag (meta/models.json → fallback → latest release)
+      # 🧠 Detect version tag (meta/models.json → latest release fallback)
       # ------------------------------------------------------------
       - name: 🧠 Detect version tag
         id: tag
@@ -92,9 +93,8 @@ jobs:
             fi
           fi
 
-          # Fallback → 最新リリースを取得
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "🧭 No meta tag found, checking latest GitHub release..."
+            echo "🧭 No meta tag found, fetching latest GitHub release..."
             TAG=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/releases/latest" \
               | jq -r '.tag_name // "unreleased"')
@@ -104,9 +104,9 @@ jobs:
           echo "🪶 Final detected tag: $TAG"
 
       # ------------------------------------------------------------
-      # 📦 Retrieve artifacts (if exist)
+      # 📦 Retrieve artifacts or release APKs
       # ------------------------------------------------------------
-      - name: 📦 Retrieve artifacts
+      - name: 📦 Retrieve artifacts or release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -115,8 +115,9 @@ jobs:
           REPO="${{ github.repository }}"
           RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
 
+          # Try build artifacts
           if [ -n "$RUN_ID" ]; then
-            echo "🔍 Fetching artifacts for run: $RUN_ID"
+            echo "🔍 Fetching artifacts from run: $RUN_ID"
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
             URL=$(jq -r '.artifacts[0].archive_download_url' artifacts_list.json)
@@ -125,13 +126,28 @@ jobs:
               unzip -o artifacts.zip -d artifacts >/dev/null || true
             fi
           fi
+
+          # Fallback: latest release assets (.apk)
+          if ! compgen -G "artifacts/*.apk" >/dev/null; then
+            echo "🧭 No build artifacts found — checking latest GitHub release assets..."
+            RELEASE_JSON=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/releases/latest")
+            echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' > release_apks.txt
+            if [ -s release_apks.txt ]; then
+              while read -r URL; do
+                echo "🌐 Found release asset: $URL"
+                wget -q --content-disposition "$URL" -P artifacts || true
+              done < release_apks.txt
+            fi
+          fi
+
           echo "📂 Artifacts listing (OK if empty):"
           ls -lh artifacts || true
 
       # ------------------------------------------------------------
-      # 🌈 Generate Wiki + Pages (always)
+      # 🌈 Generate Wiki + Pages
       # ------------------------------------------------------------
-      - name: 🌈 Generate Wiki + Pages (AutoRelease)
+      - name: 🌈 Generate Wiki + Pages
         run: |
           set -euxo pipefail
           TAG=${{ steps.tag.outputs.version_tag }}
@@ -153,7 +169,7 @@ jobs:
                 echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})"
               done
             else
-              echo "_No artifacts found._"
+              echo "_No APK artifacts found._"
             fi
             echo
             echo "## 🔗 GitHub Pages"
@@ -199,16 +215,20 @@ jobs:
                     <tr><th>File</th><th>Size</th></tr>
           HTML
 
-          for f in $(ls artifacts/*.apk 2>/dev/null || true); do
-            N=$(basename "$f")
-            S=$(du -h "$f" | cut -f1)
-            printf "<tr><td><a href='https://github.com/%s/releases/download/%s/%s'>%s</a></td><td>%s</td></tr>\n" \
-              "$REPO" "$TAG" "$N" "$N" "$S" >> gh-pages/index.html
-          done
+          if compgen -G "artifacts/*.apk" >/dev/null; then
+            for f in artifacts/*.apk; do
+              N=$(basename "$f")
+              S=$(du -h "$f" | cut -f1)
+              printf "<tr><td><a href='https://github.com/%s/releases/download/%s/%s'>%s</a></td><td>%s</td></tr>\n" \
+                "$REPO" "$TAG" "$N" "$N" "$S" >> gh-pages/index.html
+            done
+          else
+            echo "<tr><td colspan='2'><em>No APK files found in artifacts or latest release.</em></td></tr>" >> gh-pages/index.html
+          fi
 
           cat >> gh-pages/index.html <<'HTML'
                   </table>
-                  <footer>Generated by CI/CD v9.9.9 AutoRelease</footer>
+                  <footer>Generated by CI/CD v9.9.10 Full Stable</footer>
                 </div>
               </div>
             </body>
@@ -220,9 +240,9 @@ jobs:
           sed -i "s|DATE_PLACEHOLDER|${DATE}|g" gh-pages/index.html
 
       # ------------------------------------------------------------
-      # 📘 Push Wiki (force update)
+      # 📘 Push Wiki (auto branch detect)
       # ------------------------------------------------------------
-      - name: 📘 Push Wiki
+      - name: 📘 Push Wiki (auto branch detect)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -230,17 +250,20 @@ jobs:
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
           WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
+
           rm -rf wiki.push && cp -r wiki wiki.push
           cd wiki.push
           git init
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"
           git add .
-          git commit -m "📘 Auto-update Wiki (v9.9.9 AutoRelease)"
-          git branch -M main
+          git commit -m "📘 Auto-update Wiki (v9.9.10 Full Stable)"
           git remote add origin "$WIKI_URL"
-          git push origin main --force
-          echo "✅ Wiki pushed: https://github.com/${REPO}/wiki/Downloads"
+          git fetch origin || true
+          DEFAULT_BRANCH=$(git remote show origin | grep "HEAD branch" | awk '{print $NF}' || echo "master")
+          git push origin HEAD:$DEFAULT_BRANCH --force
+          echo "✅ Wiki pushed successfully to branch: ${DEFAULT_BRANCH}"
+          echo "🔗 https://github.com/${REPO}/wiki/Downloads"
 
       # ------------------------------------------------------------
       # 🚀 Publish GitHub Pages
