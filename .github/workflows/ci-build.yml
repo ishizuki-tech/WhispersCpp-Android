@@ -1,8 +1,8 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Build (v9.7.5 MetaSync-DexSafe Final)
+# ✅ WhispersCpp-Android — CI Build (v9.7.6 MetaSync-DexFull Final)
 # ------------------------------------------------------------
+# • AGP 8.13.0+ compatible (no deprecated flags)
 # • Detect + optional Review + Build (Release)
-# • Smart diff detection + Force override
 # • Dex-safe build (heap limit, cache clean)
 # • Uploads artifacts + meta for ci-publish.yml
 # ============================================================
@@ -58,7 +58,7 @@ jobs:
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
-            LAST_TAG="v9.7.5-$(date '+%Y%m%d-%H%M')"
+            LAST_TAG="v9.7.6-$(date '+%Y%m%d-%H%M')"
           fi
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG}"
@@ -114,7 +114,7 @@ jobs:
           cache: true
 
       # ------------------------------------------------------------
-      # ♻️ Clean cache to avoid Dex corruption (DexSafe)
+      # ♻️ Clean Gradle caches
       # ------------------------------------------------------------
       - name: ♻️ Clean Gradle caches (DexSafe)
         run: |
@@ -133,19 +133,19 @@ jobs:
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
       # ------------------------------------------------------------
-      # 🧠 Ensure AndroidX + Dex options
+      # 🧠 Ensure AndroidX + Dex options (AGP 8.13+)
       # ------------------------------------------------------------
       - name: 🧠 Ensure AndroidX + Dex setup
         run: |
           echo "android.useAndroidX=true" >> gradle.properties
           echo "android.enableJetifier=true" >> gradle.properties
           echo "org.gradle.jvmargs=-Xmx3g -XX:+HeapDumpOnOutOfMemoryError" >> gradle.properties
-          echo "android.enableDexingArtifactTransform=false" >> gradle.properties
+          echo "android.useFullClasspathForDexingTransform=true" >> gradle.properties
 
       # ------------------------------------------------------------
-      # 🏗️ Build Release (DexSafe + Memory)
+      # 🏗️ Build Release
       # ------------------------------------------------------------
-      - name: 🏗️ Build Release (DexSafe)
+      - name: 🏗️ Build Release (DexFull)
         env:
           GRADLE_OPTS: "-Xmx3G -Dorg.gradle.daemon=false"
         run: |
@@ -179,7 +179,7 @@ jobs:
           retention-days: 7
 
       # ------------------------------------------------------------
-      # 🧩 Generate meta/models.json (for ci-publish.yml)
+      # 🧩 Generate meta/models.json
       # ------------------------------------------------------------
       - name: 📄 Generate meta/models.json
         run: |
@@ -195,7 +195,7 @@ jobs:
             "force_build": "${{ inputs.force_build }}",
             "review_enabled": "${{ inputs.enable_review }}",
             "gradle_heap": "3G",
-            "dex_safe": true
+            "dex_full_classpath": true
           }
           JSON
           cat meta/models.json
