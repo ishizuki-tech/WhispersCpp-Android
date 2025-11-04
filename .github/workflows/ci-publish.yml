@@ -6,6 +6,7 @@
 # • Pages branch = gh-pages (404 safe)
 # • Full Tech Insight (System info + artifacts)
 # • Verified working end-to-end (Ubuntu-latest)
+# • Seamless link with: "Android CI Build (Detect + Review + Build + Release)"
 # ============================================================
 
 name: Android CI Publish (Meta + Pages + Wiki + TechInsight)
@@ -33,7 +34,7 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # Checkout + Dependencies
+      # Checkout (same head branch if triggered by workflow_run)
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
@@ -42,103 +43,114 @@ jobs:
 
       - name: 🛠️ Install dependencies
         run: |
-          set -euxo pipefail
+          set -eux
           sudo apt-get update -qq
           sudo apt-get install -y jq unzip curl wget lsb-release dmidecode
 
       # ------------------------------------------------------------
-      # Detect Tag + Meta
+      # Detect Tag + Download meta/models.json artifact (if any)
       # ------------------------------------------------------------
       - name: 🧠 Detect version tag + meta/models.json
         id: meta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euxo pipefail
+          set -eux
           REPO="${{ github.repository }}"
           RUN_ID="${{ github.event.workflow_run.id || '' }}"
           TAG="manual-run"
           mkdir -p _meta
 
+          # Try to fetch "meta" artifact from the triggering CI-Build
           if [ -n "$RUN_ID" ]; then
-            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
+            curl -sSf -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" > _meta/list.json
             META_URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
-            if [ -n "$META_URL" ] && [ "$META_URL" != "null" ]; then
-              curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$META_URL" -o _meta/meta.zip
+            if [ -n "${META_URL:-}" ] && [ "$META_URL" != "null" ]; then
+              curl -sSLf -H "Authorization: Bearer ${GH_TOKEN}" "$META_URL" -o _meta/meta.zip
               unzip -o _meta/meta.zip -d _meta >/dev/null || true
-              TAG=$(jq -r '.version_tag // empty' _meta/models.json || echo "manual-run")
+              # Prefer tag from models.json if present
+              TAG=$(jq -r '.version_tag // empty' _meta/models.json 2>/dev/null || echo "")
+              [ -z "$TAG" ] && TAG="manual-run"
             fi
           fi
 
+          # Fallback: use latest release tag
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            TAG=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/releases/latest" \
-              | jq -r '.tag_name // "unreleased"')
+            TAG=$(curl -sSf -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.tag_name // "unreleased"')
           fi
+
           echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
 
+          # System insight
           {
             echo "os=$(lsb_release -sd 2>/dev/null || uname -a)"
             echo "kernel=$(uname -r)"
             echo "cpu_cores=$(nproc)"
-            echo "cpu_model=$(lscpu | grep 'Model name' | head -n1 | cut -d: -f2- | xargs || echo 'unknown')"
-            echo "ram_total=$(grep MemTotal /proc/meminfo | awk '{print $2/1024 " MB"}' || echo 'unknown')"
+            echo "cpu_model=$(lscpu | grep -i 'model name' | head -n1 | cut -d: -f2- | xargs || echo 'unknown')"
+            echo "ram_total=$(grep MemTotal /proc/meminfo | awk '{printf \"%.1f GB\", $2/1024/1024}' || echo 'unknown')"
             echo "java=$(java -version 2>&1 | head -n1 || true)"
             echo "gradle=$(gradle -v 2>/dev/null | grep Gradle || true)"
             echo "ndk_version=$(ls /usr/local/lib/android/sdk/ndk 2>/dev/null | head -n1 || echo 'unknown')"
-          } > _meta/system.txt
+          } > _meta/system.txt || true
 
       # ------------------------------------------------------------
-      # Retrieve Artifacts / Fallback
+      # Retrieve build artifacts (release-artifacts) or fallback to latest release assets
       # ------------------------------------------------------------
       - name: 📦 Retrieve artifacts / fallback from latest release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euxo pipefail
+          set -eux
           mkdir -p artifacts
           REPO="${{ github.repository }}"
           RUN_ID="${{ github.event.workflow_run.id || '' }}"
 
+          # Try to fetch "release-artifacts" from the triggering CI-Build
           if [ -n "$RUN_ID" ]; then
-            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _artifacts.json
+            curl -sSf -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" > _artifacts.json
             URL=$(jq -r '.artifacts[] | select(.name=="release-artifacts") | .archive_download_url' _artifacts.json | head -n1)
-            if [ -n "$URL" ]; then
-              curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
+            if [ -n "${URL:-}" ] && [ "$URL" != "null" ]; then
+              curl -sSLf -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
               unzip -o artifacts.zip -d artifacts >/dev/null || true
             fi
           fi
 
+          # Fallback to latest release APKs if none extracted
           if ! compgen -G "artifacts/*.apk" >/dev/null; then
-            echo "🧭 No artifacts found — fetching latest release APKs..."
-            RELEASE=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-              "https://api.github.com/repos/${REPO}/releases/latest")
-            echo "$RELEASE" | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' > _urls.txt
+            echo "🧭 No build artifacts extracted — fetching latest release APKs as fallback..."
+            RELEASE=$(curl -sSf -H "Authorization: Bearer ${GH_TOKEN}" "https://api.github.com/repos/${REPO}/releases/latest")
+            echo "$RELEASE" | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' > _urls.txt || true
             if [ -s _urls.txt ]; then
               while read -r U; do wget -q --content-disposition "$U" -P artifacts || true; done < _urls.txt
             fi
           fi
 
       # ------------------------------------------------------------
-      # 🌈 Generate Wiki + Pages
+      # 🌈 Generate Wiki + Pages (master-safe, size auto-fill)
       # ------------------------------------------------------------
       - name: 🌈 Generate Wiki + Pages (master-safe)
         run: |
-          set -euxo pipefail
-          TAG=${{ steps.meta.outputs.version_tag }}
+          set -eux
+          TAG='${{ steps.meta.outputs.version_tag }}'
           DATE=$(date '+%Y-%m-%d %H:%M')
-          REPO="${{ github.repository }}"
-          OWNER="${{ github.repository_owner }}"
-          BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
+          REPO='${{ github.repository }}'
+          OWNER='${{ github.repository_owner }}'
+          BASE_URL="https://${OWNER}.github.io/$(basename "${REPO}")/"
           mkdir -p wiki gh-pages
 
+          # Enrich _meta/models.json with real file size if artifacts present
           if [ -f _meta/models.json ]; then
-            jq '(.models[]? | select(.size == null or .size == "auto")) |= . + {size: "pending"}' _meta/models.json > _meta/tmp.json && mv _meta/tmp.json _meta/models.json
+            # Mark missing sizes as pending for clarity
+            jq '(.models[]? | select(.size == null or .size == "auto" or .size == "")) |= . + {size: "pending"}' \
+              _meta/models.json > _meta/tmp.json && mv _meta/tmp.json _meta/models.json
+
+            # Fill sizes from actual artifact files (match exact or prefix*.bin)
             for f in $(jq -r '.models[]?.name' _meta/models.json); do
-              FILE=$(find artifacts -type f -name "$f" -o -name "$(basename $f .bin)*.bin" | head -n1 || true)
-              if [ -n "$FILE" ] && [ -f "$FILE" ]; then
+              FILE=$(find artifacts -type f -name "$f" -o -name "$(basename "$f" .bin)*.bin" | head -n1 || true)
+              if [ -n "${FILE:-}" ] && [ -f "$FILE" ]; then
                 SIZE=$(du -h "$FILE" | cut -f1)
                 jq --arg name "$f" --arg size "$SIZE" \
                   '(.models[] | select(.name==$name) | .size) |= $size' _meta/models.json > _meta/tmp.json && mv _meta/tmp.json _meta/models.json
@@ -146,6 +158,7 @@ jobs:
             done
           fi
 
+          # ---------- Wiki (Downloads.md) ----------
           {
             echo "# 📦 WhispersCpp-Android (${TAG})"
             echo "Updated: ${DATE}"
@@ -154,9 +167,13 @@ jobs:
               echo "## 🎧 Whisper Model Specifications"
               echo "| Model | Params | Size | Speed | Notes | Source |"
               echo "|:--|:--|:--|:--|:--|:--|"
-              jq -r '.models[] | "| \(.name) | \(.params) | \(.size) | \(.speed) | \(.notes) | [source](\(.source)) |"' _meta/models.json
+              jq -r 'try (.models[] | "| \(.name) | \(.params) | \(.size) | \(.speed) | \(.notes) | [source](\(.source)) |") catch ""' _meta/models.json || true
+              echo
+            else
+              echo "_No models.json found (meta not provided)._"
+              echo
             fi
-            echo
+
             echo "## 🧩 Build Artifacts"
             if compgen -G "artifacts/*.apk" >/dev/null; then
               echo "| File | Size | SHA256 |"
@@ -165,45 +182,104 @@ jobs:
                 N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
                 echo "| [$N](https://github.com/${REPO}/releases/download/${TAG}/${N}) | $S | \`$H\` |"
               done
+              echo
             else
-              echo "_No APK found._"
+              echo "_No APK artifacts found._"
+              echo
             fi
-            echo
-            echo "## ⚙️ System Info"
+
+            echo "## ⚙️ System & Build Info"
             echo '```'
-            cat _meta/system.txt || echo "(system info unavailable)"
+            cat _meta/system.txt 2>/dev/null || echo "(system info unavailable)"
             echo '```'
             echo
             echo "## 🔗 GitHub Pages"
             echo "${BASE_URL}"
           } > wiki/Downloads.md
 
-          # HTML Page
-          cat > gh-pages/index.html <<HTML
-          <!doctype html><html><head><meta charset="utf-8"/><title>📦 WhispersCpp-Android</title>
-          <style>body{font-family:system-ui;background:#0b0f17;color:#eee;padding:40px}</style>
-          </head><body><h1>📦 WhispersCpp-Android ${TAG}</h1><p>Updated: ${DATE}</p>
-          <h2>🎧 Models</h2><table border="1" cellspacing="0" cellpadding="6"><tr><th>Name</th><th>Params</th><th>Size</th><th>Speed</th><th>Notes</th></tr>
-          $(jq -r '.models[] | "<tr><td>\(.name)</td><td>\(.params)</td><td>\(.size)</td><td>\(.speed)</td><td>\(.notes)</td></tr>"' _meta/models.json)
-          </table><h2>🧩 Artifacts</h2><ul>
-          $(for f in artifacts/*.apk; do N=$(basename "$f"); echo "<li><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>${N}</a></li>"; done)
-          </ul><footer><a href='https://github.com/${REPO}/wiki/Downloads'>View Wiki</a></footer></body></html>
+          # ---------- Pages (index.html + 404.html) ----------
+          cat > gh-pages/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8"/>
+            <meta name="viewport" content="width=device-width,initial-scale=1"/>
+            <title>📦 WhispersCpp-Android Downloads</title>
+            <style>
+              body{font-family:system-ui,Inter,Roboto,-apple-system;background:#0b0f17;color:#f0f0f0;margin:0}
+              .wrap{max-width:960px;margin:auto;padding:40px}
+              .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 12px 45px rgba(0,0,0,0.35);backdrop-filter:blur(14px);padding:28px}
+              h1{margin:0 0 12px 0}
+              a{color:#7bdcff;text-decoration:none}
+              a:hover{text-decoration:underline}
+              table{width:100%;border-collapse:collapse;margin-top:16px}
+              th,td{padding:8px;border-bottom:1px solid rgba(255,255,255,0.12);text-align:left}
+              tr:hover{background:rgba(255,255,255,0.05)}
+              pre{white-space:pre-wrap;background:#0f1522;padding:10px;border-radius:10px;overflow:auto}
+              footer{margin-top:24px;font-size:.9em;color:#aaa}
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <div class="glass">
+                <h1>📦 WhispersCpp-Android</h1>
+                <p>Tag: TAG_PLACEHOLDER • Updated: DATE_PLACEHOLDER</p>
+                <p><a href="https://github.com/REPO_PLACEHOLDER/wiki/Downloads">→ View Wiki Page</a></p>
+                <h2>🎧 Whisper Model Specifications</h2>
+                <table><tr><th>Model</th><th>Params</th><th>Size</th><th>Speed</th><th>Notes</th><th>Source</th></tr>
           HTML
+
+          if [ -f _meta/models.json ]; then
+            jq -r '.models[] | "<tr><td>\(.name)</td><td>\(.params)</td><td>\(.size)</td><td>\(.speed)</td><td>\(.notes)</td><td><a href='\''\(.source)'\''>link</a></td></tr>"' _meta/models.json >> gh-pages/index.html
+          else
+            echo "<tr><td colspan='6'><em>No model information found.</em></td></tr>" >> gh-pages/index.html
+          fi
+
+          echo "                </table><h2>🧩 Build Artifacts</h2><table><tr><th>File</th><th>Size</th><th>SHA256</th></tr>" >> gh-pages/index.html
+
+          if compgen -G "artifacts/*.apk" >/dev/null; then
+            for f in artifacts/*.apk; do
+              N=$(basename "$f"); S=$(du -h "$f" | cut -f1); H=$(sha256sum "$f" | cut -d' ' -f1)
+              echo "<tr><td><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>${N}</a></td><td>${S}</td><td><code>${H}</code></td></tr>" >> gh-pages/index.html
+            done
+          else
+            echo "<tr><td colspan='3'><em>No APK artifacts found.</em></td></tr>" >> gh-pages/index.html
+          fi
+
+          cat >> gh-pages/index.html <<'HTML'
+                </table>
+                <h2>⚙️ System & Build Info</h2>
+                <pre>SYSINFO_PLACEHOLDER</pre>
+                <footer>Generated by CI/CD v9.9.34 Final Stable (Wiki→master, Pages→gh-pages)</footer>
+              </div>
+            </div>
+          </body>
+          </html>
+          HTML
+
+          # Safe substitutions
+          SYS=$(cat _meta/system.txt 2>/dev/null | sed 's/&/&amp;/g;s/</\&lt;/g;s/>/\&gt;/g' || echo "system info unavailable")
+          perl -pi -e "s|SYSINFO_PLACEHOLDER|${SYS}|g" gh-pages/index.html
+          perl -pi -e "s|TAG_PLACEHOLDER|${TAG}|g" gh-pages/index.html
+          perl -pi -e "s|DATE_PLACEHOLDER|${DATE}|g" gh-pages/index.html
+          perl -pi -e "s|REPO_PLACEHOLDER|${REPO}|g" gh-pages/index.html
+
           cp gh-pages/index.html gh-pages/404.html
           touch gh-pages/.nojekyll
 
       # ------------------------------------------------------------
-      # 📘 Push Wiki (Force → master)
+      # 📘 Push Wiki (force → master)
       # ------------------------------------------------------------
       - name: 📘 Push Wiki (force master)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eux
-          REPO="${{ github.repository }}"
-          ACTOR="${{ github.actor }}"
+          REPO='${{ github.repository }}'
+          ACTOR='${{ github.actor }}'
           WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
-          cd wiki
+          rm -rf wiki.push && cp -r wiki wiki.push
+          cd wiki.push
           git init
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"
@@ -215,7 +291,7 @@ jobs:
           echo "✅ Wiki pushed → https://github.com/${REPO}/wiki/Downloads"
 
       # ------------------------------------------------------------
-      # 🚀 Publish GitHub Pages
+      # 🚀 Publish GitHub Pages (→ gh-pages)
       # ------------------------------------------------------------
       - name: 🚀 Publish gh-pages
         uses: peaceiris/actions-gh-pages@v4
