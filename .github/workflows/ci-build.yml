@@ -1,10 +1,11 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Build (v9.7.6 MetaSync-DexFull Final)
+# ✅ WhispersCpp-Android — CI Build (v9.7.8 MetaSync-DexFull + CacheSafe Final)
 # ------------------------------------------------------------
-# • AGP 8.13.0+ compatible (no deprecated flags)
-# • Detect + optional Review + Build (Release)
-# • Dex-safe build (heap limit, cache clean)
-# • Uploads artifacts + meta for ci-publish.yml
+# • AGP 8.13.0 + Gradle 8.10 対応
+# • Diff 検出 + Review + Release Build
+# • Gradle + NDK キャッシュ最適化
+# • Dex safe build (Heap limit + 部分Clean)
+# • Safe multiline outputs (EOF error 防止)
 # ============================================================
 
 name: Android CI Build (Review + Build)
@@ -58,7 +59,7 @@ jobs:
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
-            LAST_TAG="v9.7.6-$(date '+%Y%m%d-%H%M')"
+            LAST_TAG="v9.7.8-$(date '+%Y%m%d-%H%M')"
           fi
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG}"
@@ -95,7 +96,7 @@ jobs:
     if: ${{ needs.detect.outputs.changed == 'true' || needs.detect.outputs.force == 'true' }}
     steps:
       # ------------------------------------------------------------
-      # 📦 Checkout & Environment
+      # 📦 Environment Setup
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
@@ -114,13 +115,28 @@ jobs:
           cache: true
 
       # ------------------------------------------------------------
-      # ♻️ Clean Gradle caches
+      # 💾 Gradle cache restore
       # ------------------------------------------------------------
-      - name: ♻️ Clean Gradle caches (DexSafe)
+      - name: 💾 Restore Gradle caches
+        id: gradle-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            app/.cxx
+            .gradle
+          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'gradle.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ------------------------------------------------------------
+      # ♻️ Clean Dex transform layers only
+      # ------------------------------------------------------------
+      - name: ♻️ Clean Gradle transforms (DexSafe)
         run: |
-          echo "🧹 Cleaning Gradle caches..."
-          rm -rf ~/.gradle/caches/modules-2/files-2.1/androidx.compose* || true
-          rm -rf ~/.gradle/caches/8.* || true
+          echo "🧹 Cleaning only Dex transform layers..."
+          rm -rf ~/.gradle/caches/transforms-* ~/.gradle/caches/jars-* || true
           ./gradlew clean --no-daemon
 
       # ------------------------------------------------------------
@@ -133,7 +149,7 @@ jobs:
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
       # ------------------------------------------------------------
-      # 🧠 Ensure AndroidX + Dex options (AGP 8.13+)
+      # 🧠 AndroidX + Dex options
       # ------------------------------------------------------------
       - name: 🧠 Ensure AndroidX + Dex setup
         run: |
@@ -153,23 +169,29 @@ jobs:
           ./gradlew :app:assembleRelease :app:bundleRelease --no-daemon --stacktrace --info
 
       # ------------------------------------------------------------
-      # 📂 Collect build outputs
+      # 📂 Collect build outputs (EOF safe)
       # ------------------------------------------------------------
       - id: collect
         run: |
+          set -e
           mkdir -p outputs
-          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) > outputs/files.txt || true
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) | sort > outputs/files.txt || true
+
           if [ ! -s outputs/files.txt ]; then
             echo "::warning::No APK/AAB found"
-          fi
-          {
-            echo "files<<'EOF'"
+            echo "files=" >> "$GITHUB_OUTPUT"
+          else
+            echo "📦 Found build outputs:"
             cat outputs/files.txt
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+            {
+              echo "files<<EOF"
+              cat outputs/files.txt
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       # ------------------------------------------------------------
-      # 📦 Upload main release artifacts
+      # 📦 Upload release artifacts
       # ------------------------------------------------------------
       - uses: actions/upload-artifact@v4
         if: ${{ steps.collect.outputs.files != '' }}
@@ -186,7 +208,6 @@ jobs:
           mkdir -p meta
           TAG=${{ needs.detect.outputs.last_tag }}
           DATE=$(date '+%Y-%m-%d %H:%M')
-          echo "Creating meta/models.json with tag: ${TAG}"
           cat > meta/models.json <<JSON
           {
             "version_tag": "${TAG}",
@@ -195,7 +216,8 @@ jobs:
             "force_build": "${{ inputs.force_build }}",
             "review_enabled": "${{ inputs.enable_review }}",
             "gradle_heap": "3G",
-            "dex_full_classpath": true
+            "dex_full_classpath": true,
+            "cache_enabled": true
           }
           JSON
           cat meta/models.json
@@ -209,4 +231,4 @@ jobs:
       - name: ✅ Build Finished
         run: |
           echo "✅ CI Build complete."
-          echo "ci-publish.yml will auto-trigger and use meta/models.json + artifacts next."
+          echo "ci-publish.yml will auto-trigger with artifacts + meta/models.json."
