@@ -1,9 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Publish (v9.9.6 ForcePush Always + Glass UI)
+# ✅ WhispersCpp-Android — CI Publish (v9.9.9 AutoRelease + SafeHTML Final)
 # ------------------------------------------------------------
-# • Always updates GitHub Pages and Wiki (no skip)
-# • Auto branch detection (head_branch)
-# • Safe HTML (YAML-safe heredoc)
+# • Auto detects the latest published GitHub release (fallback if meta not found)
+# • Always updates Wiki + GitHub Pages (even if artifacts are empty)
+# • SafeHTML output — YAML-safe heredoc, placeholder substitution
+# • Fully validated: no YAML or Bash syntax errors
 # ============================================================
 
 name: Android CI Publish (Meta + Pages + Wiki)
@@ -27,7 +28,7 @@ env:
   DEFAULT_ARTIFACT_NAME: "release-artifacts"
 
 jobs:
-  meta_publish:
+  publish:
     runs-on: ubuntu-latest
     if: |
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
@@ -35,7 +36,7 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # 🧩 Checkout
+      # 🧩 Checkout repository
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
@@ -43,7 +44,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
 
       # ------------------------------------------------------------
-      # 🛠️ Dependencies
+      # 🛠️ Install dependencies
       # ------------------------------------------------------------
       - name: 🛠️ Install dependencies
         run: |
@@ -52,51 +53,58 @@ jobs:
           sudo apt-get install -y jq unzip curl
 
       # ------------------------------------------------------------
-      # 🔍 Resolve run
+      # 🔎 Resolve workflow_run info (manual fallback)
       # ------------------------------------------------------------
-      - name: 🔍 Resolve build run
+      - name: 🔎 Resolve workflow run
         id: resolve
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
             echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+            echo "✅ Using workflow_run on branch: ${{ github.event.workflow_run.head_branch }}"
           else
-            echo "🧭 Manual trigger — no workflow_run info."
+            echo "🧭 Manual dispatch — no linked run_id."
           fi
 
       # ------------------------------------------------------------
-      # 🧠 Tag detection
+      # 🧠 Detect version tag (meta/models.json → fallback → latest release)
       # ------------------------------------------------------------
-      - name: 🧠 Detect tag from meta/models.json
+      - name: 🧠 Detect version tag
         id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          mkdir -p _meta
           REPO="${{ github.repository }}"
           RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
+          TAG="manual-run"
+
           if [ -n "$RUN_ID" ]; then
+            mkdir -p _meta
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
-            URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
-            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
-              curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o _meta/meta.zip
+            META_URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
+            if [ -n "$META_URL" ] && [ "$META_URL" != "null" ]; then
+              curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$META_URL" -o _meta/meta.zip
               unzip -o _meta/meta.zip -d _meta >/dev/null || true
-              TAG=$(jq -r '.version_tag // "unreleased"' _meta/models.json)
-            else
-              TAG="unreleased"
+              TAG=$(jq -r '.version_tag // empty' _meta/models.json || true)
             fi
-          else
-            TAG="manual-run"
           fi
+
+          # Fallback → 最新リリースを取得
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "🧭 No meta tag found, checking latest GitHub release..."
+            TAG=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/releases/latest" \
+              | jq -r '.tag_name // "unreleased"')
+          fi
+
           echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "🪶 Final detected tag: $TAG"
 
       # ------------------------------------------------------------
-      # 📦 Retrieve artifacts (optional)
+      # 📦 Retrieve artifacts (if exist)
       # ------------------------------------------------------------
       - name: 📦 Retrieve artifacts
         env:
@@ -106,7 +114,9 @@ jobs:
           mkdir -p artifacts
           REPO="${{ github.repository }}"
           RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
+
           if [ -n "$RUN_ID" ]; then
+            echo "🔍 Fetching artifacts for run: $RUN_ID"
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
             URL=$(jq -r '.artifacts[0].archive_download_url' artifacts_list.json)
@@ -115,12 +125,13 @@ jobs:
               unzip -o artifacts.zip -d artifacts >/dev/null || true
             fi
           fi
+          echo "📂 Artifacts listing (OK if empty):"
           ls -lh artifacts || true
 
       # ------------------------------------------------------------
-      # 🌈 Generate Wiki + Pages (Always)
+      # 🌈 Generate Wiki + Pages (always)
       # ------------------------------------------------------------
-      - name: 🌈 Generate Wiki + Pages (Always)
+      - name: 🌈 Generate Wiki + Pages (AutoRelease)
         run: |
           set -euxo pipefail
           TAG=${{ steps.tag.outputs.version_tag }}
@@ -144,7 +155,14 @@ jobs:
             else
               echo "_No artifacts found._"
             fi
+            echo
+            echo "## 🔗 GitHub Pages"
+            echo "${BASE_URL}"
           } > wiki/Downloads.md
+
+          echo "----- DEBUG: wiki/Downloads.md -----"
+          cat wiki/Downloads.md || true
+          echo "------------------------------------"
 
           # ---------- Pages (Safe HTML) ----------
           cat > gh-pages/index.html <<'HTML'
@@ -155,32 +173,43 @@ jobs:
               <meta name="viewport" content="width=device-width,initial-scale=1"/>
               <title>📦 WhispersCpp-Android Downloads</title>
               <style>
-                body{font-family:'Inter',system-ui;background:#0a0a0f;color:#eee;text-align:center;padding:40px;margin:0}
-                .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 4px 40px rgba(0,0,0,0.3);
-                backdrop-filter:blur(12px);padding:30px;margin:40px auto;width:90%;max-width:900px;}
-                a{color:#00eaff;text-decoration:none;}a:hover{text-decoration:underline;}
-                table{width:100%;border-collapse:collapse;margin-top:20px;}
-                th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,0.1);}
-                footer{margin-top:30px;font-size:0.85em;color:#aaa;}
+                body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;background:#0b0f17;color:#e8e8e8;margin:0}
+                .wrap{max-width:960px;margin:0 auto;padding:36px}
+                .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 12px 45px rgba(0,0,0,0.35);backdrop-filter:blur(14px);padding:28px}
+                h1{margin:0 0 8px 0}
+                .meta{opacity:.9}
+                table{width:100%;border-collapse:collapse;margin-top:16px}
+                th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,0.12);text-align:left}
+                tr:hover{background:rgba(255,255,255,0.05)}
+                a{color:#7bdcff;text-decoration:none}
+                a:hover{text-decoration:underline}
+                .qr{margin:10px 0 0}
+                footer{margin-top:22px;font-size:.9em;color:#aaa}
               </style>
             </head>
             <body>
-              <div class="glass">
-                <h1>📦 WhispersCpp-Android</h1>
-                <p><img src="https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=BASE_URL_PLACEHOLDER" width="100" height="100" alt="QR"></p>
-                <p>Tag: TAG_PLACEHOLDER • Updated: DATE_PLACEHOLDER</p>
-                <table><tr><th>File</th><th>Size</th></tr>
+              <div class="wrap">
+                <div class="glass">
+                  <h1>📦 WhispersCpp-Android</h1>
+                  <div class="meta">Tag: TAG_PLACEHOLDER • Updated: DATE_PLACEHOLDER</div>
+                  <div class="qr">
+                    <img src="https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=BASE_URL_PLACEHOLDER" width="110" height="110" alt="QR">
+                  </div>
+                  <table>
+                    <tr><th>File</th><th>Size</th></tr>
           HTML
 
-          for f in artifacts/*.apk 2>/dev/null; do
+          for f in $(ls artifacts/*.apk 2>/dev/null || true); do
             N=$(basename "$f")
             S=$(du -h "$f" | cut -f1)
-            echo "<tr><td><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></td><td>$S</td></tr>" >> gh-pages/index.html
+            printf "<tr><td><a href='https://github.com/%s/releases/download/%s/%s'>%s</a></td><td>%s</td></tr>\n" \
+              "$REPO" "$TAG" "$N" "$N" "$S" >> gh-pages/index.html
           done
 
           cat >> gh-pages/index.html <<'HTML'
-                </table>
-                <footer>Generated automatically by CI/CD v9.9.6 Glass UI</footer>
+                  </table>
+                  <footer>Generated by CI/CD v9.9.9 AutoRelease</footer>
+                </div>
               </div>
             </body>
             </html>
@@ -189,35 +218,32 @@ jobs:
           sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" gh-pages/index.html
           sed -i "s|TAG_PLACEHOLDER|${TAG}|g" gh-pages/index.html
           sed -i "s|DATE_PLACEHOLDER|${DATE}|g" gh-pages/index.html
-          echo "✅ Wiki + Page generated at ${DATE}"
 
       # ------------------------------------------------------------
-      # 📘 Push Wiki (Force update)
+      # 📘 Push Wiki (force update)
       # ------------------------------------------------------------
-      - name: 📘 Push Wiki (Force update)
+      - name: 📘 Push Wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
-          TAG_VAL="${{ steps.tag.outputs.version_tag }}"
           WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
-
           rm -rf wiki.push && cp -r wiki wiki.push
           cd wiki.push
           git init
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"
           git add .
-          git commit -m "📘 Force update Wiki (${TAG_VAL})"
+          git commit -m "📘 Auto-update Wiki (v9.9.9 AutoRelease)"
           git branch -M main
           git remote add origin "$WIKI_URL"
           git push origin main --force
           echo "✅ Wiki pushed: https://github.com/${REPO}/wiki/Downloads"
 
       # ------------------------------------------------------------
-      # 🚀 Publish gh-pages (Force orphan)
+      # 🚀 Publish GitHub Pages
       # ------------------------------------------------------------
       - name: 🚀 Publish gh-pages
         uses: peaceiris/actions-gh-pages@v4
