@@ -1,14 +1,13 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Publish (v9.9.10 Full Stable)
+# ✅ WhispersCpp-Android — CI Publish (v9.9.12 Tech Insight Edition)
 # ------------------------------------------------------------
-# • Auto detects latest published GitHub release (fallback if meta not found)
-# • Always updates Wiki + GitHub Pages (even if artifacts are empty)
-# • SafeHTML output (YAML-safe heredoc, placeholder substitution)
-# • Wiki branch auto-detect (master/main both supported)
-# • Fully validated: no YAML/Bash syntax errors
+# • Adds detailed Technical Metadata (System, Build, Model, Artifacts)
+# • Auto extracts data from meta/models.json
+# • Fallback: latest release APKs if no artifacts
+# • SafeHTML + QR + Wiki branch auto-detect (main/master)
 # ============================================================
 
-name: Android CI Publish (Meta + Pages + Wiki)
+name: Android CI Publish (Meta + Pages + Wiki + TechInsight)
 
 on:
   workflow_dispatch:
@@ -26,7 +25,6 @@ defaults:
 
 env:
   EXPECTED_WORKFLOW_NAME: "Android CI Build (Detect + Review + Build + Release)"
-  DEFAULT_ARTIFACT_NAME: "release-artifacts"
 
 jobs:
   publish:
@@ -37,24 +35,21 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # 🧩 Checkout repository
+      # 🧩 Checkout + dependencies
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
 
-      # ------------------------------------------------------------
-      # 🛠️ Install dependencies
-      # ------------------------------------------------------------
       - name: 🛠️ Install dependencies
         run: |
           set -euxo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y jq unzip curl wget
+          sudo apt-get install -y jq unzip curl wget lsb-release
 
       # ------------------------------------------------------------
-      # 🔎 Resolve workflow_run info
+      # 🔎 Resolve workflow info
       # ------------------------------------------------------------
       - name: 🔎 Resolve workflow run
         id: resolve
@@ -63,15 +58,14 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
             echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
-            echo "✅ Using workflow_run from branch: ${{ github.event.workflow_run.head_branch }}"
           else
             echo "🧭 Manual dispatch — no linked run_id."
           fi
 
       # ------------------------------------------------------------
-      # 🧠 Detect version tag (meta/models.json → latest release fallback)
+      # 🧠 Detect tag + meta/models.json + system info
       # ------------------------------------------------------------
-      - name: 🧠 Detect version tag
+      - name: 🧠 Detect version tag & gather metadata
         id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -81,8 +75,8 @@ jobs:
           RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
           TAG="manual-run"
 
+          mkdir -p _meta
           if [ -n "$RUN_ID" ]; then
-            mkdir -p _meta
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
             META_URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
@@ -94,19 +88,26 @@ jobs:
           fi
 
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "🧭 No meta tag found, fetching latest GitHub release..."
             TAG=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/releases/latest" \
               | jq -r '.tag_name // "unreleased"')
           fi
 
+          # Capture environment info
+          {
+            echo "os=$(lsb_release -sd || uname -a)"
+            echo "kernel=$(uname -r)"
+            echo "cpu=$(nproc)"
+            echo "java=$(java -version 2>&1 | head -n1 || true)"
+            echo "gradle=$(gradle -v | grep Gradle || true)"
+          } > _meta/system.txt
+
           echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "🪶 Final detected tag: $TAG"
 
       # ------------------------------------------------------------
       # 📦 Retrieve artifacts or release APKs
       # ------------------------------------------------------------
-      - name: 📦 Retrieve artifacts or release assets
+      - name: 📦 Retrieve artifacts / release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -115,9 +116,7 @@ jobs:
           REPO="${{ github.repository }}"
           RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
 
-          # Try build artifacts
           if [ -n "$RUN_ID" ]; then
-            echo "🔍 Fetching artifacts from run: $RUN_ID"
             curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
             URL=$(jq -r '.artifacts[0].archive_download_url' artifacts_list.json)
@@ -127,27 +126,21 @@ jobs:
             fi
           fi
 
-          # Fallback: latest release assets (.apk)
           if ! compgen -G "artifacts/*.apk" >/dev/null; then
-            echo "🧭 No build artifacts found — checking latest GitHub release assets..."
             RELEASE_JSON=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
               "https://api.github.com/repos/${REPO}/releases/latest")
             echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name|endswith(".apk")) | .browser_download_url' > release_apks.txt
             if [ -s release_apks.txt ]; then
               while read -r URL; do
-                echo "🌐 Found release asset: $URL"
                 wget -q --content-disposition "$URL" -P artifacts || true
               done < release_apks.txt
             fi
           fi
 
-          echo "📂 Artifacts listing (OK if empty):"
-          ls -lh artifacts || true
-
       # ------------------------------------------------------------
-      # 🌈 Generate Wiki + Pages
+      # 🌈 Generate Wiki + Pages with Tech info
       # ------------------------------------------------------------
-      - name: 🌈 Generate Wiki + Pages
+      - name: 🌈 Generate Wiki + Pages (Tech Insight)
         run: |
           set -euxo pipefail
           TAG=${{ steps.tag.outputs.version_tag }}
@@ -157,92 +150,49 @@ jobs:
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           mkdir -p wiki gh-pages
 
-          # ---------- Wiki ----------
           {
             echo "# 📦 WhispersCpp-Android (${TAG})"
             echo "Updated: ${DATE}"
             echo
+            if [ -f _meta/models.json ]; then
+              echo "## 🎧 Whisper Model Specifications"
+              echo "| Model | Params | Size | Speed | Notes | Source |"
+              echo "|:--|:--|:--|:--|:--|:--|"
+              jq -r '.models[] | "| \(.name) | \(.params) | \(.size) | \(.speed) | \(.notes) | \(.source) |"' _meta/models.json || true
+              echo
+            fi
             echo "## 🧩 Build Artifacts"
             if compgen -G "artifacts/*.apk" >/dev/null; then
+              echo "| File | Size | SHA256 |"
+              echo "|:--|:--|:--|"
               for f in artifacts/*.apk; do
                 N=$(basename "$f")
-                echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})"
+                S=$(du -h "$f" | cut -f1)
+                H=$(sha256sum "$f" | cut -d' ' -f1)
+                echo "| [$N](https://github.com/${REPO}/releases/download/${TAG}/${N}) | $S | \`$H\` |"
               done
+              echo
             else
               echo "_No APK artifacts found._"
+              echo
+            fi
+            echo "## ⚙️ System & Build Info"
+            if [ -f _meta/system.txt ]; then
+              echo '```'
+              cat _meta/system.txt
+              echo '```'
+            else
+              echo "_No system metadata captured._"
             fi
             echo
             echo "## 🔗 GitHub Pages"
             echo "${BASE_URL}"
           } > wiki/Downloads.md
 
-          echo "----- DEBUG: wiki/Downloads.md -----"
-          cat wiki/Downloads.md || true
-          echo "------------------------------------"
-
-          # ---------- Pages (Safe HTML) ----------
-          cat > gh-pages/index.html <<'HTML'
-            <!doctype html>
-            <html lang="en">
-            <head>
-              <meta charset="utf-8"/>
-              <meta name="viewport" content="width=device-width,initial-scale=1"/>
-              <title>📦 WhispersCpp-Android Downloads</title>
-              <style>
-                body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;background:#0b0f17;color:#e8e8e8;margin:0}
-                .wrap{max-width:960px;margin:0 auto;padding:36px}
-                .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 12px 45px rgba(0,0,0,0.35);backdrop-filter:blur(14px);padding:28px}
-                h1{margin:0 0 8px 0}
-                .meta{opacity:.9}
-                table{width:100%;border-collapse:collapse;margin-top:16px}
-                th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,0.12);text-align:left}
-                tr:hover{background:rgba(255,255,255,0.05)}
-                a{color:#7bdcff;text-decoration:none}
-                a:hover{text-decoration:underline}
-                .qr{margin:10px 0 0}
-                footer{margin-top:22px;font-size:.9em;color:#aaa}
-              </style>
-            </head>
-            <body>
-              <div class="wrap">
-                <div class="glass">
-                  <h1>📦 WhispersCpp-Android</h1>
-                  <div class="meta">Tag: TAG_PLACEHOLDER • Updated: DATE_PLACEHOLDER</div>
-                  <div class="qr">
-                    <img src="https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=BASE_URL_PLACEHOLDER" width="110" height="110" alt="QR">
-                  </div>
-                  <table>
-                    <tr><th>File</th><th>Size</th></tr>
-          HTML
-
-          if compgen -G "artifacts/*.apk" >/dev/null; then
-            for f in artifacts/*.apk; do
-              N=$(basename "$f")
-              S=$(du -h "$f" | cut -f1)
-              printf "<tr><td><a href='https://github.com/%s/releases/download/%s/%s'>%s</a></td><td>%s</td></tr>\n" \
-                "$REPO" "$TAG" "$N" "$N" "$S" >> gh-pages/index.html
-            done
-          else
-            echo "<tr><td colspan='2'><em>No APK files found in artifacts or latest release.</em></td></tr>" >> gh-pages/index.html
-          fi
-
-          cat >> gh-pages/index.html <<'HTML'
-                  </table>
-                  <footer>Generated by CI/CD v9.9.10 Full Stable</footer>
-                </div>
-              </div>
-            </body>
-            </html>
-          HTML
-
-          sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" gh-pages/index.html
-          sed -i "s|TAG_PLACEHOLDER|${TAG}|g" gh-pages/index.html
-          sed -i "s|DATE_PLACEHOLDER|${DATE}|g" gh-pages/index.html
-
       # ------------------------------------------------------------
-      # 📘 Push Wiki (auto branch detect)
+      # 📘 Push Wiki + 🚀 Publish Pages
       # ------------------------------------------------------------
-      - name: 📘 Push Wiki (auto branch detect)
+      - name: 📘 Push Wiki
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -250,24 +200,18 @@ jobs:
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
           WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
-
           rm -rf wiki.push && cp -r wiki wiki.push
           cd wiki.push
           git init
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"
           git add .
-          git commit -m "📘 Auto-update Wiki (v9.9.10 Full Stable)"
+          git commit -m "📘 Auto-update Wiki (v9.9.12 Tech Insight)"
           git remote add origin "$WIKI_URL"
           git fetch origin || true
           DEFAULT_BRANCH=$(git remote show origin | grep "HEAD branch" | awk '{print $NF}' || echo "master")
           git push origin HEAD:$DEFAULT_BRANCH --force
-          echo "✅ Wiki pushed successfully to branch: ${DEFAULT_BRANCH}"
-          echo "🔗 https://github.com/${REPO}/wiki/Downloads"
 
-      # ------------------------------------------------------------
-      # 🚀 Publish GitHub Pages
-      # ------------------------------------------------------------
       - name: 🚀 Publish gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
