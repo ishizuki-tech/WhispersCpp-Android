@@ -1,12 +1,10 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Publish (v9.7.7 Debug+Stable NoTagSync Final)
+# ✅ WhispersCpp-Android — CI Publish (v9.7.9a ManualSafe Final)
 # ------------------------------------------------------------
 # • Auto-triggered after ci-build.yml success (workflow_run)
-# • Also runnable manually (workflow_dispatch)
-# • No AutoTag: 既存タグ/リリースを再利用（作成しない）
-# • Tag優先: build meta > latest release > last git tag > 'unreleased'
-# • Full debug mode + robust error handling
-# • Pages: gh-pages branch root index.html (Glass UI)
+# • Manual-safe (branch/artifact override)
+# • Auto Wiki & Pages generation (Glass UI)
+# • Improved API stability + orphan-safe Wiki push
 # ============================================================
 
 name: Android CI Publish (Meta + Pages + Wiki)
@@ -21,7 +19,7 @@ on:
         description: "Artifact name uploaded by build workflow"
         default: "release-artifacts"
   workflow_run:
-    workflows: ["Android CI Build (Review + Build)"]
+    workflows: ["Android CI Build (Detect + Review + Build + Release)"]
     types: [completed]
 
 permissions:
@@ -33,7 +31,7 @@ defaults:
     shell: bash
 
 env:
-  EXPECTED_WORKFLOW_NAME: "Android CI Build (Review + Build)"
+  EXPECTED_WORKFLOW_NAME: "Android CI Build (Detect + Review + Build + Release)"
   DEFAULT_ARTIFACT_NAME: "release-artifacts"
 
 jobs:
@@ -42,12 +40,12 @@ jobs:
     if: |
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'workflow_dispatch')
+
     steps:
       # ------------------------------------------------------------
       # 🧩 Checkout
       # ------------------------------------------------------------
-      - name: 🧩 Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.branch || 'main' }}
@@ -62,7 +60,7 @@ jobs:
           sudo apt-get install -y jq unzip curl
 
       # ------------------------------------------------------------
-      # 🔎 Resolve build run ID
+      # 🔎 Resolve build run ID (manual-safe + fallback)
       # ------------------------------------------------------------
       - name: 🔎 Resolve build run ID
         id: resolve_run
@@ -74,33 +72,39 @@ jobs:
           TARGET_BRANCH="${{ inputs.branch || 'main' }}"
           WF_EXPECTED="${{ env.EXPECTED_WORKFLOW_NAME }}"
 
-          echo "🔎 Checking workflow context..."
-          echo "Event name: ${{ github.event_name }}"
-          echo "Expected workflow: ${WF_EXPECTED}"
-
+          echo "🔍 Event: ${{ github.event_name }}"
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             RUN_ID="${{ github.event.workflow_run.id }}"
-            echo "✅ Linked mode: Using build run $RUN_ID"
+            echo "✅ Linked mode: using build run $RUN_ID"
             echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-            echo "mode=linked" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "🧭 Manual mode: searching latest successful build on branch: $TARGET_BRANCH"
+          echo "🧭 Manual mode: searching latest successful build..."
           RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs?status=success&branch=${TARGET_BRANCH}&per_page=50" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}/actions/runs?status=success&branch=${TARGET_BRANCH}&per_page=20" \
             | jq -r --arg name "${WF_EXPECTED}" '.workflow_runs[] | select(.name==$name) | .id' | head -n1)
 
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "::warning::No successful build run found on ${TARGET_BRANCH}"
-            echo "run_id=" >> "$GITHUB_OUTPUT"
-          else
-            echo "📦 Found build run: $RUN_ID"
-            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+            echo "::warning::No successful build found, trying last run (any status)..."
+            RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPO}/actions/runs?branch=${TARGET_BRANCH}&per_page=10" \
+              | jq -r --arg name "${WF_EXPECTED}" '.workflow_runs[] | select(.name==$name) | .id' | head -n1)
           fi
 
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No valid build run found on branch ${TARGET_BRANCH}"
+            echo "run_id=" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "📦 Using build run ID: $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
       # ------------------------------------------------------------
-      # 🧠 Read tag from meta/models.json
+      # 🧠 Extract tag from meta/models.json
       # ------------------------------------------------------------
       - name: 🧠 Extract tag from meta/models.json
         id: tag_from_meta
@@ -114,35 +118,33 @@ jobs:
           RUN_ID="${{ steps.resolve_run.outputs.run_id }}"
           echo "🔍 Fetching meta artifact list for run $RUN_ID..."
           curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
+               -H "X-GitHub-Api-Version: 2022-11-28" \
+               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
 
           jq -r '.artifacts[].name' _meta/list.json || echo "(no artifacts)"
           URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
-
           if [ -z "$URL" ] || [ "$URL" = "null" ]; then
             echo "::notice::No meta artifact found."
             echo "has_meta=false" >> "$GITHUB_OUTPUT"
+            echo "version_tag=unreleased" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "⬇️ Downloading meta artifact..."
           curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o _meta/meta.zip
           unzip -o _meta/meta.zip -d _meta >/dev/null || true
-
-          if [ -f _meta/models.json ]; then
-            TAG=$(jq -r '.version_tag // empty' _meta/models.json)
-            if [ -n "$TAG" ]; then
-              echo "🪶 Found tag in meta: $TAG"
-              echo "has_meta=true" >> "$GITHUB_OUTPUT"
-              echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+          TAG=$(jq -r '.version_tag // empty' _meta/models.json || echo "")
+          if [ -n "$TAG" ]; then
+            echo "🪶 Found tag: $TAG"
+          else
+            TAG="unreleased"
+            echo "::notice::version_tag missing, fallback to '$TAG'"
           fi
-          echo "::notice::No tag found in meta/models.json"
-          echo "has_meta=false" >> "$GITHUB_OUTPUT"
+          echo "has_meta=true" >> "$GITHUB_OUTPUT"
+          echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
-      # 🏷️ Decide tag (meta > release > git > fallback)
+      # 🏷️ Decide tag (meta > release > git)
       # ------------------------------------------------------------
       - name: 🏷️ Decide tag
         id: tag
@@ -152,20 +154,15 @@ jobs:
           set -euxo pipefail
           REPO="${{ github.repository }}"
           TAG_META="${{ steps.tag_from_meta.outputs.version_tag }}"
-
           if [ -n "$TAG_META" ]; then
-            TAG="$TAG_META"
-            SRC="meta"
+            TAG="$TAG_META"; SRC="meta"
           else
             TAG=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
               "https://api.github.com/repos/${REPO}/releases/latest" | jq -r '.tag_name // empty')
-            if [ -n "$TAG" ]; then SRC="latest_release"; else
-              TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "unreleased")
-              SRC="git_or_unreleased"
-            fi
+            [ -n "$TAG" ] && SRC="release" || TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "unreleased")
           fi
-
-          echo "🧩 Tag resolved: $TAG (src=$SRC)"
+          echo "🧩 Tag resolved: $TAG (source=$SRC)"
           echo "tag_name=$TAG" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
@@ -183,55 +180,19 @@ jobs:
           NAME_PRI="${{ inputs.artifact_name || env.DEFAULT_ARTIFACT_NAME }}"
           echo "🔎 Searching artifacts for run $RUN_ID..."
           curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
-          jq -r '.artifacts[].name' artifacts_list.json || echo "(none)"
+               -H "X-GitHub-Api-Version: 2022-11-28" \
+               "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
+
+          jq -r '.artifacts[].name' artifacts_list.json || true
           URL=$(jq -r --arg n "$NAME_PRI" '.artifacts[] | select(.name==$n) | .archive_download_url' artifacts_list.json | head -n1)
           [ -z "$URL" ] && URL=$(jq -r '.artifacts[0].archive_download_url' artifacts_list.json)
-          [ -z "$URL" ] && { echo "::warning::No artifact found"; exit 0; }
-          echo "⬇️ Downloading artifact zip..."
+          [ -z "$URL" ] && { echo "::warning::No artifact URL found"; exit 0; }
           curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
           unzip -o artifacts.zip -d artifacts >/dev/null || true
-          echo "📂 Artifacts list:"
-          ls -lh artifacts || true
+          echo "📂 Artifact files:"; ls -lh artifacts || true
 
       # ------------------------------------------------------------
-      # 🔐 Check release existence
-      # ------------------------------------------------------------
-      - name: 🔐 Check release existence
-        id: rel_check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euxo pipefail
-          REPO="${{ github.repository }}"
-          TAG="${{ steps.tag.outputs.tag_name }}"
-          REL_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/releases/tags/${TAG}" | jq -r '.id // empty')
-          if [ -n "$REL_ID" ]; then
-            echo "✅ Release exists for tag: $TAG (id=$REL_ID)"
-            echo "release_exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::Release not found for tag: $TAG"
-            echo "release_exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # ------------------------------------------------------------
-      # 🚀 Upload artifacts to existing release
-      # ------------------------------------------------------------
-      - name: 🚀 Upload artifacts to release
-        if: ${{ steps.rel_check.outputs.release_exists == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag_name }}
-          files: |
-            artifacts/*.apk
-            artifacts/*.aab
-          append_body: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ------------------------------------------------------------
-      # 🌈 Generate Wiki + Pages (Glass UI)
+      # 🌈 Generate Wiki + Pages
       # ------------------------------------------------------------
       - name: 🌈 Generate Wiki + Pages (Glass UI)
         run: |
@@ -243,29 +204,20 @@ jobs:
           BASE_URL="https://${OWNER}.github.io/$(basename ${REPO})/"
           mkdir -p wiki gh-pages
 
-          echo "📘 Writing wiki/Downloads.md ..."
-          {
-            echo "# 📦 WhispersCpp-Android (${TAG})"
-            echo "Updated: ${DATE}"
-            echo
-            echo "## 🧩 Build Artifacts"
-            if compgen -G "artifacts/*.apk" >/dev/null; then
-              for f in artifacts/*.apk; do
-                N=$(basename "$f")
-                echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})"
-              done
-            else
-              echo "_No artifacts found._"
-            fi
-            echo
-            echo "## 🔗 Downloads Page"
-            echo "<div align=\"center\">"
-            echo "<img src=\"https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${BASE_URL}\" width=\"180\" height=\"180\"><br>"
-            echo "🔗 <a href=\"${BASE_URL}\">Open Glass UI Downloads Page</a>"
-            echo "</div>"
-          } > wiki/Downloads.md
+          echo "# 📦 WhispersCpp-Android (${TAG})" > wiki/Downloads.md
+          echo "Updated: ${DATE}" >> wiki/Downloads.md
+          echo >> wiki/Downloads.md
+          echo "## 🧩 Artifacts" >> wiki/Downloads.md
+          if compgen -G "artifacts/*.apk" >/dev/null; then
+            for f in artifacts/*.apk; do
+              N=$(basename "$f")
+              echo "- [$N](https://github.com/${REPO}/releases/download/${TAG}/${N})" >> wiki/Downloads.md
+            done
+          else
+            echo "_No artifacts found._" >> wiki/Downloads.md
+          fi
 
-          echo "🌐 Building gh-pages/index.html ..."
+          rm -rf gh-pages/.git || true
           cat > gh-pages/index.html <<HTML
           <!doctype html><html><head><meta charset="utf-8"/>
           <title>📦 WhispersCpp Downloads</title>
@@ -277,10 +229,10 @@ jobs:
             N=$(basename "$f")
             echo "<li><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></li>" >> gh-pages/index.html
           done
-          echo "</ul><footer>Generated by CI/CD v9.7.7</footer></body></html>" >> gh-pages/index.html
+          echo "</ul><footer>Generated ${DATE}</footer></body></html>" >> gh-pages/index.html
 
       # ------------------------------------------------------------
-      # 📘 Push Wiki
+      # 📘 Push Wiki (safe re-init)
       # ------------------------------------------------------------
       - name: 📘 Push Wiki
         env:
@@ -289,14 +241,19 @@ jobs:
           set -euxo pipefail
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
+          HAS_WIKI=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}" | jq -r '.has_wiki')
+          [ "$HAS_WIKI" != "true" ] && { echo "::warning::Wiki disabled, skipping."; exit 0; }
+
           WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
           rm -rf wiki.push && cp -r wiki wiki.push
           cd wiki.push
           git init
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"
-          git add Downloads.md
-          git commit -m "📘 Auto-update Wiki (v9.7.7 Debug+Stable)"
+          git add .
+          git commit -m "📘 Auto-update Wiki (${TAG})"
           git push --force "$WIKI_URL" master
 
       # ------------------------------------------------------------
@@ -308,5 +265,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: gh-pages
           publish_branch: gh-pages
-          keep_files: false
           force_orphan: true
