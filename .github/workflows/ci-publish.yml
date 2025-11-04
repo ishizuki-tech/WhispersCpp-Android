@@ -1,20 +1,15 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI Publish (v9.9.5 SafeHTML + AutoBranch + Glass UI Final)
+# ✅ WhispersCpp-Android — CI Publish (v9.9.6 ForcePush Always + Glass UI)
 # ------------------------------------------------------------
-# • Triggered after Build workflow success or manual dispatch
+# • Always updates GitHub Pages and Wiki (no skip)
 # • Auto branch detection (head_branch)
-# • Safe HTML generation (indented heredoc)
-# • Wiki + Pages auto-sync (Glass UI)
+# • Safe HTML (YAML-safe heredoc)
 # ============================================================
 
 name: Android CI Publish (Meta + Pages + Wiki)
 
 on:
   workflow_dispatch:
-    inputs:
-      artifact_name:
-        description: "Artifact name uploaded by build workflow"
-        default: "release-artifacts"
   workflow_run:
     workflows: ["Android CI Build (Detect + Review + Build + Release)"]
     types: [completed]
@@ -40,7 +35,7 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # 🧩 Checkout (auto branch)
+      # 🧩 Checkout
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
@@ -57,96 +52,78 @@ jobs:
           sudo apt-get install -y jq unzip curl
 
       # ------------------------------------------------------------
-      # 🔎 Resolve build run ID
+      # 🔍 Resolve run
       # ------------------------------------------------------------
-      - name: 🔎 Resolve build run ID
-        id: resolve_run
+      - name: 🔍 Resolve build run
+        id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            RUN_ID="${{ github.event.workflow_run.id }}"
-            BRANCH="${{ github.event.workflow_run.head_branch }}"
-            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-            echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-            echo "✅ Using workflow_run from branch ${BRANCH}"
-            exit 0
+            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+            echo "branch=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "🧭 Manual trigger — no workflow_run info."
           fi
 
-          echo "🧭 Manual trigger — finding latest successful build..."
-          REPO="${{ github.repository }}"
-          WF_NAME="${{ env.EXPECTED_WORKFLOW_NAME }}"
-          RUN_ID=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs?status=success&per_page=10" \
-            | jq -r --arg name "$WF_NAME" '.workflow_runs[] | select(.name==$name) | .id' | head -n1)
-          [ -z "$RUN_ID" ] && { echo "::error::No successful build run found."; exit 1; }
-          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-
       # ------------------------------------------------------------
-      # 🧠 Extract tag from meta/models.json
+      # 🧠 Tag detection
       # ------------------------------------------------------------
-      - name: 🧠 Extract tag from meta/models.json
-        id: tag_from_meta
+      - name: 🧠 Detect tag from meta/models.json
+        id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           mkdir -p _meta
           REPO="${{ github.repository }}"
-          RUN_ID="${{ steps.resolve_run.outputs.run_id }}"
-          echo "Fetching meta artifact from run $RUN_ID ..."
-          curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
-
-          URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
-          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "version_tag=unreleased" >> "$GITHUB_OUTPUT"
-            exit 0
+          RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
+          if [ -n "$RUN_ID" ]; then
+            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > _meta/list.json
+            URL=$(jq -r '.artifacts[] | select(.name=="meta") | .archive_download_url' _meta/list.json | head -n1)
+            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+              curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o _meta/meta.zip
+              unzip -o _meta/meta.zip -d _meta >/dev/null || true
+              TAG=$(jq -r '.version_tag // "unreleased"' _meta/models.json)
+            else
+              TAG="unreleased"
+            fi
+          else
+            TAG="manual-run"
           fi
-
-          curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o _meta/meta.zip
-          unzip -o _meta/meta.zip -d _meta >/dev/null || true
-          TAG=$(jq -r '.version_tag // "unreleased"' _meta/models.json)
-          echo "🪶 Detected tag: $TAG"
           echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # ------------------------------------------------------------
-      # 📦 Retrieve artifacts
+      # 📦 Retrieve artifacts (optional)
       # ------------------------------------------------------------
       - name: 📦 Retrieve artifacts
-        id: fetch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           mkdir -p artifacts
           REPO="${{ github.repository }}"
-          RUN_ID="${{ steps.resolve_run.outputs.run_id }}"
-          NAME="${{ inputs.artifact_name || env.DEFAULT_ARTIFACT_NAME }}"
-
-          echo "🔍 Fetching artifact list for run $RUN_ID ..."
-          curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
-            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
-
-          URL=$(jq -r --arg n "$NAME" '.artifacts[] | select(.name==$n) | .archive_download_url' artifacts_list.json | head -n1)
-          [ -z "$URL" ] && URL=$(jq -r '.artifacts[0].archive_download_url' artifacts_list.json)
-          if [ -z "$URL" ] || [ "$URL" = "null" ]; then
-            echo "::warning::No artifact found — skipping page/wiki."
-            exit 0
+          RUN_ID="${{ steps.resolve.outputs.run_id || '' }}"
+          if [ -n "$RUN_ID" ]; then
+            curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+              "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" > artifacts_list.json
+            URL=$(jq -r '.artifacts[0].archive_download_url' artifacts_list.json)
+            if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+              curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
+              unzip -o artifacts.zip -d artifacts >/dev/null || true
+            fi
           fi
-
-          curl -sL -H "Authorization: Bearer ${GH_TOKEN}" "$URL" -o artifacts.zip
-          unzip -o artifacts.zip -d artifacts >/dev/null || true
-          echo "✅ Extracted artifacts:"; ls -lh artifacts || true
+          ls -lh artifacts || true
 
       # ------------------------------------------------------------
-      # 🌈 Generate Wiki + Pages (Glass UI)
+      # 🌈 Generate Wiki + Pages (Always)
       # ------------------------------------------------------------
-      - name: 🌈 Generate Wiki + Pages (Glass UI)
+      - name: 🌈 Generate Wiki + Pages (Always)
         run: |
           set -euxo pipefail
-          TAG=${{ steps.tag_from_meta.outputs.version_tag }}
+          TAG=${{ steps.tag.outputs.version_tag }}
           DATE=$(date '+%Y-%m-%d %H:%M')
           REPO="${{ github.repository }}"
           OWNER="${{ github.repository_owner }}"
@@ -158,7 +135,7 @@ jobs:
             echo "# 📦 WhispersCpp-Android (${TAG})"
             echo "Updated: ${DATE}"
             echo
-            echo "## 🧩 Artifacts"
+            echo "## 🧩 Build Artifacts"
             if compgen -G "artifacts/*.apk" >/dev/null; then
               for f in artifacts/*.apk; do
                 N=$(basename "$f")
@@ -169,7 +146,7 @@ jobs:
             fi
           } > wiki/Downloads.md
 
-          # ---------- Safe HTML ----------
+          # ---------- Pages (Safe HTML) ----------
           cat > gh-pages/index.html <<'HTML'
             <!doctype html>
             <html lang="en">
@@ -181,9 +158,9 @@ jobs:
                 body{font-family:'Inter',system-ui;background:#0a0a0f;color:#eee;text-align:center;padding:40px;margin:0}
                 .glass{background:rgba(255,255,255,0.08);border-radius:20px;box-shadow:0 4px 40px rgba(0,0,0,0.3);
                 backdrop-filter:blur(12px);padding:30px;margin:40px auto;width:90%;max-width:900px;}
+                a{color:#00eaff;text-decoration:none;}a:hover{text-decoration:underline;}
                 table{width:100%;border-collapse:collapse;margin-top:20px;}
                 th,td{padding:10px;border-bottom:1px solid rgba(255,255,255,0.1);}
-                a{color:#00eaff;text-decoration:none;}a:hover{text-decoration:underline;}
                 footer{margin-top:30px;font-size:0.85em;color:#aaa;}
               </style>
             </head>
@@ -195,17 +172,15 @@ jobs:
                 <table><tr><th>File</th><th>Size</th></tr>
           HTML
 
-          if compgen -G "artifacts/*.apk" >/dev/null; then
-            for f in artifacts/*.apk; do
-              N=$(basename "$f")
-              S=$(du -h "$f" | cut -f1)
-              echo "<tr><td><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></td><td>$S</td></tr>" >> gh-pages/index.html
-            done
-          fi
+          for f in artifacts/*.apk 2>/dev/null; do
+            N=$(basename "$f")
+            S=$(du -h "$f" | cut -f1)
+            echo "<tr><td><a href='https://github.com/${REPO}/releases/download/${TAG}/${N}'>$N</a></td><td>$S</td></tr>" >> gh-pages/index.html
+          done
 
           cat >> gh-pages/index.html <<'HTML'
                 </table>
-                <footer>Generated automatically by CI/CD v9.9.5 Glass UI</footer>
+                <footer>Generated automatically by CI/CD v9.9.6 Glass UI</footer>
               </div>
             </body>
             </html>
@@ -214,18 +189,19 @@ jobs:
           sed -i "s|BASE_URL_PLACEHOLDER|${BASE_URL}|g" gh-pages/index.html
           sed -i "s|TAG_PLACEHOLDER|${TAG}|g" gh-pages/index.html
           sed -i "s|DATE_PLACEHOLDER|${DATE}|g" gh-pages/index.html
+          echo "✅ Wiki + Page generated at ${DATE}"
 
       # ------------------------------------------------------------
-      # 📘 Push Wiki
+      # 📘 Push Wiki (Force update)
       # ------------------------------------------------------------
-      - name: 📘 Push Wiki
+      - name: 📘 Push Wiki (Force update)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
           REPO="${{ github.repository }}"
           ACTOR="${{ github.actor }}"
-          TAG_VAL="${{ steps.tag_from_meta.outputs.version_tag }}"
+          TAG_VAL="${{ steps.tag.outputs.version_tag }}"
           WIKI_URL="https://${ACTOR}:${GH_TOKEN}@github.com/${REPO}.wiki.git"
 
           rm -rf wiki.push && cp -r wiki wiki.push
@@ -234,13 +210,14 @@ jobs:
           git config user.name "$ACTOR"
           git config user.email "$ACTOR@users.noreply.github.com"
           git add .
-          git commit -m "📘 Auto-update Wiki (${TAG_VAL})"
+          git commit -m "📘 Force update Wiki (${TAG_VAL})"
           git branch -M main
           git remote add origin "$WIKI_URL"
           git push origin main --force
+          echo "✅ Wiki pushed: https://github.com/${REPO}/wiki/Downloads"
 
       # ------------------------------------------------------------
-      # 🚀 Publish gh-pages
+      # 🚀 Publish gh-pages (Force orphan)
       # ------------------------------------------------------------
       - name: 🚀 Publish gh-pages
         uses: peaceiris/actions-gh-pages@v4
