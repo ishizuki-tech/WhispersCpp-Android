@@ -1,11 +1,11 @@
 # ============================================================
-# ✅ WhispersCpp-Android — CI/CD Build (v9.9.1 MetaSync + AutoRelease Stable)
+# ✅ WhispersCpp-Android — CI/CD Build (v9.9.6 AutoBranch + MetaSync + AutoRelease Stable)
 # ------------------------------------------------------------
 # • Detect → Review → Build → Release
 # • Whisper models auto-download (verified)
-# • meta/models.json includes full Whisper model specs
+# • meta/models.json includes full Whisper model specs + REAL SIZE
+# • No branch input: uses same branch as "Use workflow from"
 # • Compatible with CI Publish v9.9.30+
-# • Verified end-to-end build & release flow
 # ============================================================
 
 name: Android CI Build (Detect + Review + Build + Release)
@@ -13,10 +13,6 @@ name: Android CI Build (Detect + Review + Build + Release)
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: "Target branch to build"
-        required: false
-        default: "main"
       enable_review:
         description: "Run Lint & Unit Tests before build"
         type: boolean
@@ -53,18 +49,27 @@ jobs:
       changed: ${{ steps.check.outputs.changed }}
       force: ${{ steps.force.outputs.force }}
       last_tag: ${{ steps.tag.outputs.last_tag }}
+      current_branch: ${{ steps.branch.outputs.current_branch }}
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout & Branch detection (same as "Use workflow from")
+      # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ inputs.branch || github.ref_name }}
+
+      - id: branch
+        run: |
+          BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+          echo "current_branch=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+          echo "🌿 Using branch: ${BRANCH_NAME}"
 
       - id: tag
         run: |
           LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
-            LAST_TAG="v9.9.1-$(date '+%Y%m%d-%H%M')"
+            LAST_TAG="v9.9.6-$(date '+%Y%m%d-%H%M')"
           fi
           echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Last tag: ${LAST_TAG}"
@@ -102,13 +107,13 @@ jobs:
 
     steps:
       # ------------------------------------------------------------
-      # 📦 Checkout + Setup
+      # Checkout current branch automatically
       # ------------------------------------------------------------
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
-          ref: ${{ inputs.branch || github.ref_name }}
+          ref: ${{ needs.detect.outputs.current_branch }}
 
       - uses: actions/setup-java@v4
         with:
@@ -121,7 +126,7 @@ jobs:
           cache: true
 
       # ------------------------------------------------------------
-      # 💾 Gradle Cache
+      # Gradle Cache
       # ------------------------------------------------------------
       - uses: actions/cache@v4
         with:
@@ -134,16 +139,16 @@ jobs:
           restore-keys: gradle-${{ runner.os }}-
 
       # ------------------------------------------------------------
-      # ♻️ Clean (DexSafe)
+      # Clean (DexSafe)
       # ------------------------------------------------------------
       - name: ♻️ Clean Gradle transforms
         run: |
-          echo "🧹 Cleaning Dex transform cache..."
+          echo "🧹 Cleaning Gradle transform cache..."
           rm -rf ~/.gradle/caches/transforms-* ~/.gradle/caches/jars-* || true
           ./gradlew clean --no-daemon
 
       # ------------------------------------------------------------
-      # 🧪 Review (Lint & Test)
+      # Lint + Unit Tests (conditional)
       # ------------------------------------------------------------
       - name: 🧪 Run Lint & Unit Tests
         if: ${{ inputs.enable_review == true }}
@@ -152,7 +157,7 @@ jobs:
           ./gradlew :app:testDebugUnitTest || echo "::warning::Tests failed"
 
       # ------------------------------------------------------------
-      # 🧠 Gradle Optimization
+      # Gradle Optimization
       # ------------------------------------------------------------
       - name: 🧠 Setup gradle.properties
         run: |
@@ -166,7 +171,7 @@ jobs:
           EOF
 
       # ------------------------------------------------------------
-      # 🎧 Whisper Model Auto Download
+      # Whisper Model Auto Download
       # ------------------------------------------------------------
       - name: 🎧 Download Whisper models
         run: |
@@ -193,20 +198,17 @@ jobs:
 
           download ggml-tiny-q5_1.bin \
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin"
-
           download ggml-base-q5_1.bin \
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin"
-
           download ggml-small-q5_1.bin \
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin"
-
           download ggml-model-q4_0.bin \
             "https://huggingface.co/jboat/jacaranda-asr-whispercpp/resolve/main/ggml-model-q4_0.bin"
 
           echo "--- Downloaded files ---"; ls -lh
 
       # ------------------------------------------------------------
-      # 🏗️ Build Release
+      # Build Release
       # ------------------------------------------------------------
       - name: 🏗️ Build Release (DexFull)
         env:
@@ -216,7 +218,7 @@ jobs:
           ./gradlew :app:assembleRelease :app:bundleRelease --stacktrace --no-daemon --info
 
       # ------------------------------------------------------------
-      # 📂 Collect outputs
+      # Collect outputs
       # ------------------------------------------------------------
       - id: collect
         run: |
@@ -229,7 +231,7 @@ jobs:
           fi
 
       # ------------------------------------------------------------
-      # 📤 Upload artifacts
+      # Upload artifacts for Publish workflow
       # ------------------------------------------------------------
       - uses: actions/upload-artifact@v4
         with:
@@ -240,25 +242,37 @@ jobs:
           retention-days: 7
 
       # ------------------------------------------------------------
-      # 🧩 Generate meta/models.json (Full Model Info)
+      # Generate meta/models.json (FULL + REAL SIZE)
       # ------------------------------------------------------------
-      - name: 📄 Generate meta/models.json (Whisper Metadata)
+      - name: 📄 Generate meta/models.json (Whisper Metadata + Size)
         run: |
+          set -euo pipefail
           mkdir -p meta
           TAG=${{ needs.detect.outputs.last_tag }}
           DATE=$(date '+%Y-%m-%d %H:%M')
+
+          size_or_null () {
+            f="app/src/main/assets/models/$1"
+            if [ -f "$f" ]; then du -h "$f" | cut -f1; else echo null; fi
+          }
+
+          TINY_SIZE=$(size_or_null ggml-tiny-q5_1.bin)
+          BASE_SIZE=$(size_or_null ggml-base-q5_1.bin)
+          SMALL_SIZE=$(size_or_null ggml-small-q5_1.bin)
+          JACA_SIZE=$(size_or_null ggml-model-q4_0.bin)
+
           cat > meta/models.json <<JSON
           {
             "version_tag": "${TAG}",
             "generated": "${DATE}",
-            "branch": "${{ inputs.branch || github.ref_name }}",
+            "branch": "${{ needs.detect.outputs.current_branch }}",
             "heap": "3G",
             "cache_enabled": true,
             "models": [
               {
                 "name": "ggml-tiny-q5_1.bin",
                 "params": "39M",
-                "size": null,
+                "size": ${TINY_SIZE:+\"$TINY_SIZE\"},
                 "speed": "~32× RT",
                 "notes": "Multilingual (EN/JP/SW)",
                 "source": "https://huggingface.co/ggerganov/whisper.cpp"
@@ -266,7 +280,7 @@ jobs:
               {
                 "name": "ggml-base-q5_1.bin",
                 "params": "74M",
-                "size": null,
+                "size": ${BASE_SIZE:+\"$BASE_SIZE\"},
                 "speed": "~16× RT",
                 "notes": "Balanced multilingual model",
                 "source": "https://huggingface.co/ggerganov/whisper.cpp"
@@ -274,7 +288,7 @@ jobs:
               {
                 "name": "ggml-small-q5_1.bin",
                 "params": "244M",
-                "size": null,
+                "size": ${SMALL_SIZE:+\"$SMALL_SIZE\"},
                 "speed": "~8× RT",
                 "notes": "High accuracy (medium speed)",
                 "source": "https://huggingface.co/ggerganov/whisper.cpp"
@@ -282,7 +296,7 @@ jobs:
               {
                 "name": "ggml-model-q4_0.bin",
                 "params": "1.5B",
-                "size": null,
+                "size": ${JACA_SIZE:+\"$JACA_SIZE\"},
                 "speed": "~2× RT",
                 "notes": "Jacaranda Swahili fine-tuned model",
                 "source": "https://huggingface.co/jboat/jacaranda-asr-whispercpp"
@@ -290,6 +304,7 @@ jobs:
             ]
           }
           JSON
+
           echo "✅ meta/models.json generated:"
           cat meta/models.json
 
@@ -300,12 +315,11 @@ jobs:
           retention-days: 7
 
       # ------------------------------------------------------------
-      # 🚀 GitHub Release
+      # GitHub Release
       # ------------------------------------------------------------
       - id: version
         run: |
           VERSION=$(grep -E 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || echo "0.0.0")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           TAG="v${VERSION}-$(date '+%Y%m%d-%H%M')"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "🪶 Release tag: $TAG"
@@ -314,7 +328,7 @@ jobs:
         if: ${{ inputs.create_release == true }}
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: "WhispersCpp Release ${{ steps.version.outputs.version }}"
+          name: "WhispersCpp Release ${{ steps.version.outputs.tag }}"
           files: |
             app/build/outputs/**/*.apk
             app/build/outputs/**/*.aab
@@ -324,4 +338,5 @@ jobs:
       - name: ✅ Build Finished
         run: |
           echo "✅ WhispersCpp-Android build completed successfully."
-          echo "Artifacts and meta uploaded for CI Publish."
+          echo "Branch: ${{ needs.detect.outputs.current_branch }}"
+          echo "Artifacts + meta uploaded (release-artifacts, meta)."
